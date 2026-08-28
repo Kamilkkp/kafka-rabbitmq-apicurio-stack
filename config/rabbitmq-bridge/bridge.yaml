@@ -1,0 +1,38 @@
+# Forwards Debezium events to RabbitMQ without changing their Avro payload.
+input:
+  redpanda:
+    seed_brokers: ['${CDC_KAFKA_BROKER}']
+    topics:
+      - ${CDC_SALES_TOPIC}
+      - ${CDC_WAREHOUSE_TOPIC}
+    consumer_group: ${CDC_CONSUMER_GROUP}
+    start_offset: earliest
+
+pipeline:
+  processors:
+    # Tombstones are for Kafka compaction. The preceding op=d event contains
+    # the source table and before image.
+    - mapping: |
+        root = if meta("kafka_tombstone_message") == "true" { deleted() } else { content() }
+
+    # Internal Kafka metadata cannot be serialized as AMQP headers, so expose
+    # only stable scalar values. cdc_table is `{db}.{schema}.{table}`.
+    - mapping: |
+        meta = {
+          "cdc_table": meta("cdc_table"),
+          "kafka_topic": meta("kafka_topic"),
+          "kafka_partition": meta("kafka_partition"),
+          "kafka_offset": meta("kafka_offset"),
+          "kafka_timestamp_ms": meta("kafka_timestamp_ms"),
+        }
+
+output:
+  amqp_0_9:
+    urls: ['${CDC_RABBITMQ_URL}']
+    exchange: ${CDC_RABBITMQ_EXCHANGE}
+    key: ${! meta("cdc_table") }
+    content_type: application/avro
+    persistent: true
+
+logger:
+  level: INFO

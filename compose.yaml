@@ -1,0 +1,277 @@
+name: ${CDC_STACK_NAME:-cdc-stack}
+
+x-connect-init: &connect-init
+  build:
+    context: ./docker/kafka-connect
+    dockerfile: init/Dockerfile
+  depends_on:
+    apicurio:
+      condition: service_started
+    kafka-connect:
+      condition: service_healthy
+  extra_hosts:
+    - 'host.docker.internal:host-gateway'
+  restart: 'no'
+
+services:
+  kafka:
+    image: apache/kafka:4.1.1
+    ports:
+      - '9092:9092'
+    environment:
+      CLUSTER_ID: ${CDC_KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://${CDC_KAFKA_ADVERTISED_HOST:-localhost}:9092
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: '1'
+      KAFKA_DEFAULT_REPLICATION_FACTOR: '1'
+      KAFKA_MIN_INSYNC_REPLICAS: '1'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_LOG_CLEANER_ENABLE: 'true'
+      KAFKA_HEAP_OPTS: ${CDC_KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 >/dev/null 2>&1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:4.1.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      CDC_SALES_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
+      CDC_WAREHOUSE_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic kafkasql-journal \
+          --partitions 1 \
+          --replication-factor 1 \
+          --config cleanup.policy=compact
+
+        for topic in "$${CDC_SALES_TOPIC}" "$${CDC_WAREHOUSE_TOPIC}"; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:29092 \
+            --create \
+            --if-not-exists \
+            --topic "$$topic" \
+            --partitions 1 \
+            --replication-factor 1 \
+            --config cleanup.policy=compact \
+            --config segment.ms=3600000 \
+            --config min.cleanable.dirty.ratio=0.1 \
+            --config delete.retention.ms=86400000
+        done
+    restart: 'no'
+
+  apicurio:
+    build:
+      context: ./docker/apicurio
+    ports:
+      - '8081:8080'
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REGISTRY_KAFKASQL_TOPIC: kafkasql-journal
+      REGISTRY_KAFKASQL_TOPIC_AUTO_CREATE: 'false'
+      # No REGISTRY_KAFKASQL_CONSUMER_GROUP_ID on purpose. KafkaSQL keeps its
+      # whole state in memory and rebuilds it by replaying the journal, so a
+      # fixed group id makes a restarted instance resume from the committed
+      # offset and come up with an empty registry.
+      REGISTRY_UI_CONFIG_APIURL: /apis/registry
+      REGISTRY_UI_CONFIG_UIURL: /ui
+      JAVA_OPTS_APPEND: ${CDC_APICURIO_JAVA_OPTS:--Xms128m -Xmx384m}
+    restart: unless-stopped
+
+  kafka-connect:
+    build:
+      context: ./docker/kafka-connect
+    ports:
+      - '8083:8083'
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: ${CDC_CONNECT_GROUP_ID:-cdc-connect}
+      CONFIG_STORAGE_TOPIC: ${CDC_CONNECT_CONFIG_TOPIC:-cdc.connect-configs}
+      OFFSET_STORAGE_TOPIC: ${CDC_CONNECT_OFFSET_TOPIC:-cdc.connect-offsets}
+      STATUS_STORAGE_TOPIC: ${CDC_CONNECT_STATUS_TOPIC:-cdc.connect-statuses}
+      CONFIG_STORAGE_REPLICATION_FACTOR: '1'
+      OFFSET_STORAGE_REPLICATION_FACTOR: '1'
+      STATUS_STORAGE_REPLICATION_FACTOR: '1'
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: 'false'
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: 'false'
+      CONNECT_TOPIC_CREATION_ENABLE: 'true'
+      ENABLE_APICURIO_CONVERTERS: 'true'
+      HEAP_OPTS: ${CDC_KAFKA_CONNECT_HEAP_OPTS:--Xms256m -Xmx768m}
+    healthcheck:
+      test: ['CMD-SHELL', 'curl --fail --silent http://localhost:8083/connector-plugins >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  kafka-connect-init-sales:
+    <<: *connect-init
+    environment:
+      CONNECT_URL: http://kafka-connect:8083
+      CONNECTOR_NAME: ${CDC_SALES_CONNECTOR_NAME:-sales-postgres}
+      DATABASE_HOSTNAME: ${CDC_SALES_DATABASE_HOSTNAME:-sales-db.internal}
+      DATABASE_PORT: ${CDC_SALES_DATABASE_PORT:-5432}
+      DATABASE_DBNAME: ${CDC_SALES_DATABASE_DBNAME:-sales}
+      DEBEZIUM_DATABASE_USER: ${CDC_SALES_DATABASE_USER:-debezium}
+      DEBEZIUM_DATABASE_PASSWORD: ${CDC_SALES_DATABASE_PASSWORD:-admin}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${CDC_SALES_TOPIC_PREFIX:-sales}
+      DEBEZIUM_SOURCE_SLOT_NAME: ${CDC_SALES_SLOT_NAME:-sales_debezium}
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${CDC_SALES_PUBLICATION_NAME:-sales_debezium_pub}
+      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${CDC_SALES_SCHEMA_HISTORY_TOPIC:-sales.schema-history}
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${CDC_SALES_SCHEMA_INCLUDE_LIST:-public}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_SALES_TABLE_INCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_SALES_TABLE_EXCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_SALES_COLUMN_EXCLUDE_LIST:-}
+      DEBEZIUM_APICURIO_URL: http://apicurio:8080
+      CDC_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
+
+  kafka-connect-init-warehouse:
+    <<: *connect-init
+    environment:
+      CONNECT_URL: http://kafka-connect:8083
+      CONNECTOR_NAME: ${CDC_WAREHOUSE_CONNECTOR_NAME:-warehouse-postgres}
+      DATABASE_HOSTNAME: ${CDC_WAREHOUSE_DATABASE_HOSTNAME:-warehouse-db.internal}
+      DATABASE_PORT: ${CDC_WAREHOUSE_DATABASE_PORT:-5432}
+      DATABASE_DBNAME: ${CDC_WAREHOUSE_DATABASE_DBNAME:-warehouse}
+      DEBEZIUM_DATABASE_USER: ${CDC_WAREHOUSE_DATABASE_USER:-debezium}
+      DEBEZIUM_DATABASE_PASSWORD: ${CDC_WAREHOUSE_DATABASE_PASSWORD:-admin}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${CDC_WAREHOUSE_TOPIC_PREFIX:-warehouse}
+      DEBEZIUM_SOURCE_SLOT_NAME: ${CDC_WAREHOUSE_SLOT_NAME:-warehouse_debezium}
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${CDC_WAREHOUSE_PUBLICATION_NAME:-warehouse_debezium_pub}
+      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${CDC_WAREHOUSE_SCHEMA_HISTORY_TOPIC:-warehouse.schema-history}
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${CDC_WAREHOUSE_SCHEMA_INCLUDE_LIST:-public}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_INCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_EXCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
+      DEBEZIUM_APICURIO_URL: http://apicurio:8080
+      CDC_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
+
+  rabbitmq:
+    image: rabbitmq:4.3.5-management-alpine
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    environment:
+      RABBITMQ_DEFAULT_USER: ${CDC_RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${CDC_RABBITMQ_PASSWORD:-admin}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD-SHELL', 'rabbitmq-diagnostics --quiet check_running && rabbitmq-diagnostics --quiet check_port_connectivity']
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  rabbitmq-init:
+    image: curlimages/curl:8.19.0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        curl \
+          --silent \
+          --show-error \
+          --fail-with-body \
+          --user "${CDC_RABBITMQ_USER:-admin}:${CDC_RABBITMQ_PASSWORD:-admin}" \
+          --request PUT \
+          --header 'Content-Type: application/json' \
+          --data '{"type":"topic","durable":true,"auto_delete":false}' \
+          "http://rabbitmq:15672/api/exchanges/%2F/${CDC_RABBITMQ_EXCHANGE:-cdc.events}"
+        echo "Exchange ${CDC_RABBITMQ_EXCHANGE:-cdc.events} is configured."
+    restart: 'no'
+
+  cdc-rabbitmq-bridge:
+    image: docker.redpanda.com/redpandadata/connect:4.106.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+    environment:
+      CDC_KAFKA_BROKER: kafka:29092
+      CDC_SALES_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
+      CDC_WAREHOUSE_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
+      CDC_CONSUMER_GROUP: ${CDC_RABBITMQ_CONSUMER_GROUP:-cdc-rabbitmq-bridge}
+      CDC_RABBITMQ_URL: amqp://${CDC_RABBITMQ_USER:-admin}:${CDC_RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
+      CDC_RABBITMQ_EXCHANGE: ${CDC_RABBITMQ_EXCHANGE:-cdc.events}
+    volumes:
+      - ./config/rabbitmq-bridge/bridge.yaml:/connect.yaml:ro
+    restart: unless-stopped
+
+  kafbat-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    ports:
+      - '8082:8080'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      apicurio:
+        condition: service_started
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ${CDC_KAFBAT_CLUSTER_NAME:-cdc}
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://apicurio:8080/apis/ccompat/v6
+      KAFKA_CLUSTERS_0_DEFAULTKEYSERDE: SchemaRegistry
+      KAFKA_CLUSTERS_0_DEFAULTVALUESERDE: SchemaRegistry
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: ${CDC_CONNECT_GROUP_ID:-cdc-connect}
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      AUTH_TYPE: LOGIN_FORM
+      SPRING_SECURITY_USER_NAME: ${CDC_KAFBAT_USER:-admin}
+      SPRING_SECURITY_USER_PASSWORD: ${CDC_KAFBAT_PASSWORD:-admin}
+      JAVA_OPTS: ${CDC_KAFBAT_JAVA_OPTS:--Xms128m -Xmx256m}
+    restart: unless-stopped
+
+networks:
+  default:
+    name: ${CDC_NETWORK_NAME:-cdc-stack-network}
+
+volumes:
+  kafka-data:
+    name: ${CDC_KAFKA_VOLUME_NAME:-cdc-stack-kafka-data}
+  rabbitmq-data:
+    name: ${CDC_RABBITMQ_VOLUME_NAME:-cdc-stack-rabbitmq-data}
