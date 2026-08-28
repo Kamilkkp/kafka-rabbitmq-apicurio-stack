@@ -27,7 +27,8 @@ This consumer talks to:
 | Kafka    | `localhost:9092` |
 | Apicurio | `http://localhost:8081` (`/apis/ccompat/v7`) |
 
-Default compacted CDC topics: `sales.cdc` and `warehouse.cdc`.
+Default compacted CDC topics are one per table, for example
+`sales.public.customers` and `warehouse.public.products`.
 
 ## Setup
 
@@ -56,23 +57,37 @@ CDC_ONESHOT=1 CDC_ONESHOT_MAX=5 .venv/bin/python cdc_consumer.py
 To re-read topics from the beginning on assign:
 
 ```bash
-CDC_SEEK_TO_BEGINNING=sales.cdc,warehouse.cdc .venv/bin/python cdc_consumer.py
+CDC_SEEK_TO_BEGINNING=sales.public.customers,warehouse.public.products .venv/bin/python cdc_consumer.py
 ```
 
 ## Config
 
-| Variable | Required | Default / notes |
-|----------|----------|-----------------|
-| `CDC_KAFKA_BROKERS` | yes | `localhost:9092` |
-| `CDC_KAFKA_GROUP_ID` | yes | consumer group |
-| `CDC_APICURIO_URL` | yes | registry origin; client appends `/apis/ccompat/v7` |
-| `CDC_SALES_TOPIC` | no | `sales.cdc` |
-| `CDC_WAREHOUSE_TOPIC` | no | `warehouse.cdc` |
-| `CDC_TOPICS` | no | comma-separated override of both topics |
-| `CDC_KAFKA_TOPIC_PATTERN` | no | if set, used instead of the topic list (Kafka regex subscribe) |
-| `CDC_SEEK_TO_BEGINNING` | no | comma-separated topic names to seek to offset 0 |
-| `CDC_ONESHOT` | no | `1` = drain then exit |
-| `CDC_ONESHOT_MAX` | no | `5` when oneshot |
+These are every variable the script reads. See `.env.example` for values that
+work against the local stack.
+
+Three are required and have no fallback — if one is missing or empty, startup
+exits with `Missing env <name>`:
+
+| Variable | Notes |
+|----------|-------|
+| `CDC_KAFKA_BROKERS` | Bootstrap servers passed to librdkafka |
+| `CDC_KAFKA_GROUP_ID` | Consumer group; use a fresh one to re-read from the start |
+| `CDC_APICURIO_URL` | Registry origin only; the client appends `/apis/ccompat/v7` |
+
+The rest are optional:
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `CDC_TOPICS` | the six demo table topics | Comma-separated topic names to subscribe to |
+| `CDC_KAFKA_TOPIC_PATTERN` | unset | Takes precedence over `CDC_TOPICS`. **Must start with `^`**, otherwise librdkafka reads it as a literal topic name rather than a regex |
+| `CDC_SEEK_TO_BEGINNING` | unset | Comma-separated topics rewound to offset 0 on partition assign |
+| `CDC_ONESHOT` | unset | Exactly `1` enables one-shot mode; any other value is ignored |
+| `CDC_ONESHOT_MAX` | `5` | One-shot only: stop after this many messages (it also gives up after 30 empty polls) |
+
+The six default topics are `sales.public.{customers,orders,order_items}` and
+`warehouse.public.{products,warehouses,stock_levels}`. Debezium creates a topic
+per captured table, so a table added later needs either `CDC_TOPICS` or a
+pattern.
 
 `auto.offset.reset` is `earliest`; offsets are committed only after a
 successful handle (or tombstone). Unhandled events fail the message and

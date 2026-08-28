@@ -176,13 +176,23 @@ def handle_message(decoder: ConfluentAvroDecoder, message: Message) -> str:
 
 
 def subscription() -> list[str]:
+    """Named topics by default.
+
+    This consumer reads Kafka directly and librdkafka has no exclude list, so
+    the topics it wants are listed rather than inferred. Set
+    `CDC_KAFKA_TOPIC_PATTERN` for a regex subscription instead.
+    """
     pattern = os.environ.get("CDC_KAFKA_TOPIC_PATTERN")
     if pattern:
         return [pattern]
     topics = os.environ.get("CDC_TOPICS") or ",".join(
         (
-            os.environ.get("CDC_SALES_TOPIC", "sales.cdc"),
-            os.environ.get("CDC_WAREHOUSE_TOPIC", "warehouse.cdc"),
+            "sales.public.customers",
+            "sales.public.orders",
+            "sales.public.order_items",
+            "warehouse.public.products",
+            "warehouse.public.warehouses",
+            "warehouse.public.stock_levels",
         )
     )
     return [topic.strip() for topic in topics.split(",") if topic.strip()]

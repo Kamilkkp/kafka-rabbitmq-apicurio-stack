@@ -1,10 +1,25 @@
 # Forwards Debezium events to RabbitMQ without changing their Avro payload.
+# One compacted Kafka topic per table (`{prefix}.{schema}.{table}`); the
+# routing key is that topic name.
 input:
   redpanda:
     seed_brokers: ['${CDC_KAFKA_BROKER}']
-    topics:
-      - ${CDC_SALES_TOPIC}
-      - ${CDC_WAREHOUSE_TOPIC}
+    # Consume every topic, then subtract infrastructure ones. Table topics are
+    # always `{prefix}.{schema}.{table}`, so none of these patterns can match
+    # one: adding a captured table or a whole new connector needs no change.
+    # `regexp_topics_include` is what enables regex mode, hence the catch-all.
+    regexp_topics_include: ['.']
+    regexp_topics_exclude:
+      # Kafka internals
+      - '^__consumer_offsets$'
+      - '^__transaction_state$'
+      - '^__cluster_metadata$'
+      # Apicurio Registry storage
+      - '^kafkasql-journal$'
+      # Kafka Connect state, one set per Connect cluster
+      - '^[^.]+\.connect-(configs|offsets|statuses)$'
+      # Debezium DDL history, one per connector
+      - '^[^.]+\.schema-history$'
     consumer_group: ${CDC_CONSUMER_GROUP}
     start_offset: earliest
 
@@ -16,21 +31,26 @@ pipeline:
         root = if meta("kafka_tombstone_message") == "true" { deleted() } else { content() }
 
     # Internal Kafka metadata cannot be serialized as AMQP headers, so expose
-    # only stable scalar values. cdc_table is `{db}.{schema}.{table}`.
+    # only stable scalar values. `kafka-topic` is `{db}.{schema}.{table}`.
+    #
+    # `kafka-key` carries the Kafka message key, which is Debezium's row identity
+    # (the primary key, or whatever REPLICA IDENTITY declares) and the very key
+    # compaction uses. It is Avro, so base64 to survive an AMQP header; the
+    # consumer decodes it against the `<topic>-key` subject.
     - mapping: |
         meta = {
-          "cdc_table": meta("cdc_table"),
-          "kafka_topic": meta("kafka_topic"),
-          "kafka_partition": meta("kafka_partition"),
-          "kafka_offset": meta("kafka_offset"),
-          "kafka_timestamp_ms": meta("kafka_timestamp_ms"),
+          "kafka-topic": meta("kafka_topic"),
+          "kafka-key": meta("kafka_key").or("").encode("base64"),
+          "kafka-partition": meta("kafka_partition"),
+          "kafka-offset": meta("kafka_offset"),
+          "kafka-timestamp-ms": meta("kafka_timestamp_ms"),
         }
 
 output:
   amqp_0_9:
     urls: ['${CDC_RABBITMQ_URL}']
     exchange: ${CDC_RABBITMQ_EXCHANGE}
-    key: ${! meta("cdc_table") }
+    key: ${! meta("kafka-topic") }
     content_type: application/avro
     persistent: true
 

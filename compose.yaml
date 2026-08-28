@@ -58,9 +58,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    environment:
-      CDC_SALES_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
-      CDC_WAREHOUSE_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
     command:
       - /bin/bash
       - -ec
@@ -73,20 +70,6 @@ services:
           --partitions 1 \
           --replication-factor 1 \
           --config cleanup.policy=compact
-
-        for topic in "$${CDC_SALES_TOPIC}" "$${CDC_WAREHOUSE_TOPIC}"; do
-          /opt/kafka/bin/kafka-topics.sh \
-            --bootstrap-server kafka:29092 \
-            --create \
-            --if-not-exists \
-            --topic "$$topic" \
-            --partitions 1 \
-            --replication-factor 1 \
-            --config cleanup.policy=compact \
-            --config segment.ms=3600000 \
-            --config min.cleanable.dirty.ratio=0.1 \
-            --config delete.retention.ms=86400000
-        done
     restart: 'no'
 
   apicurio:
@@ -161,7 +144,6 @@ services:
       DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_SALES_TABLE_EXCLUDE_LIST:-}
       DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_SALES_COLUMN_EXCLUDE_LIST:-}
       DEBEZIUM_APICURIO_URL: http://apicurio:8080
-      CDC_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
 
   kafka-connect-init-warehouse:
     <<: *connect-init
@@ -182,7 +164,6 @@ services:
       DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_EXCLUDE_LIST:-}
       DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
       DEBEZIUM_APICURIO_URL: http://apicurio:8080
-      CDC_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
 
   rabbitmq:
     image: rabbitmq:4.3.5-management-alpine
@@ -232,8 +213,6 @@ services:
         condition: service_completed_successfully
     environment:
       CDC_KAFKA_BROKER: kafka:29092
-      CDC_SALES_TOPIC: ${CDC_SALES_TOPIC:-sales.cdc}
-      CDC_WAREHOUSE_TOPIC: ${CDC_WAREHOUSE_TOPIC:-warehouse.cdc}
       CDC_CONSUMER_GROUP: ${CDC_RABBITMQ_CONSUMER_GROUP:-cdc-rabbitmq-bridge}
       CDC_RABBITMQ_URL: amqp://${CDC_RABBITMQ_USER:-admin}:${CDC_RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
       CDC_RABBITMQ_EXCHANGE: ${CDC_RABBITMQ_EXCHANGE:-cdc.events}

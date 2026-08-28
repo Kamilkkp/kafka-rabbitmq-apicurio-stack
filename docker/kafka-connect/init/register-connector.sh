@@ -11,7 +11,6 @@ set -eu
 : "${DEBEZIUM_SOURCE_PUBLICATION_NAME:?}"
 : "${DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST:?}"
 : "${DEBEZIUM_APICURIO_URL:?}"
-: "${CDC_TOPIC:?}"
 
 CONNECT_URL="${CONNECT_URL:-http://kafka-connect:8083}"
 CONNECTOR_NAME="${CONNECTOR_NAME:-postgres-cdc}"
@@ -64,12 +63,8 @@ jq \
   --arg column_exclude_list "$COLUMN_EXCLUDE_LIST" \
   --arg schema_history_topic "$SCHEMA_HISTORY_TOPIC" \
   --arg apicurio_url "$DEBEZIUM_APICURIO_URL/apis/registry/v2" \
-  --arg collapse_regex "$DEBEZIUM_SOURCE_TOPIC_PREFIX\\..*" \
-  --arg collapse_replacement "$CDC_TOPIC" \
   '
     . + {
-      "transforms.Collapse.regex": $collapse_regex,
-      "transforms.Collapse.replacement": $collapse_replacement,
       "database.hostname": $database_hostname,
       "database.port": $database_port,
       "database.dbname": $database_dbname,

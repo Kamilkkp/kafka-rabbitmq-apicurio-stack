@@ -4,7 +4,7 @@ import { kafkaReplayOnStart } from '../config.js';
 
 /**
  * Holds RabbitMQ delivery until the startup Kafka replay finishes.
- * Duplicate events on the overlap are the handlers' problem (idempotency).
+ * Overlap with the bridge is dropped by the apply engine (LWW on `source.lsn`).
  */
 @Injectable()
 export class ReplayGate {

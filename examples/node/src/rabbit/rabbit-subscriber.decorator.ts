@@ -1,11 +1,16 @@
 import {
-  MessageHandlerErrorBehavior,
   RabbitSubscribe,
 } from '@golevelup/nestjs-rabbitmq';
 import { Injectable } from '@nestjs/common';
-import type { ConsumeMessage } from 'amqplib';
+import type { ConfirmChannel, ConsumeMessage, Options } from 'amqplib';
 
 import { rabbitExchange, rabbitQueuePrefix } from '../config.js';
+import {
+  deadLetterQueueName,
+  retryDecision,
+  retryHeaders,
+  retryQueueName,
+} from './retry-policy.js';
 
 export interface RabbitMessageHandler {
   handle(payload: Buffer, message: ConsumeMessage): Promise<void>;
@@ -35,8 +40,50 @@ export function cdcTableSubscription(source: string): RabbitSubscribeConfig {
     queue: `${rabbitQueuePrefix}.${source}`,
     queueOptions: { durable: true },
     deserializer: (message) => message,
-    errorBehavior: MessageHandlerErrorBehavior.REQUEUE,
+    errorHandler: async (channel, message, error) => {
+      const decision = retryDecision(message.properties.headers);
+      const queue =
+        decision.kind === 'retry'
+          ? retryQueueName(source, decision.delayMs)
+          : deadLetterQueueName(source);
+
+      try {
+        await sendConfirmed(channel as ConfirmChannel, queue, message, {
+          headers: retryHeaders(message.properties.headers, decision),
+          persistent: true,
+        });
+        channel.ack(message);
+        console.error(
+          decision.kind === 'retry'
+            ? `CDC ${source} failed; retry ${decision.attempt} in ${decision.delayMs}ms`
+            : `CDC ${source} failed; parked after ${decision.attempt} attempts (${decision.reason})`,
+          error,
+        );
+      } catch (publishError) {
+        // Never acknowledge the original until its replacement is confirmed.
+        // An infrastructure failure may spin briefly, but cannot lose the event.
+        channel.nack(message, false, true);
+        console.error(`Could not enqueue failed CDC ${source}`, publishError);
+      }
+    },
   };
+}
+
+function sendConfirmed(
+  channel: ConfirmChannel,
+  queue: string,
+  message: ConsumeMessage,
+  overrides: Options.Publish,
+): Promise<void> {
+  const { expiration: _expiration, headers, ...properties } = message.properties;
+  return new Promise((resolve, reject) => {
+    channel.sendToQueue(
+      queue,
+      message.content,
+      { ...properties, ...overrides, headers: overrides.headers ?? headers },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
 }
 
 /**

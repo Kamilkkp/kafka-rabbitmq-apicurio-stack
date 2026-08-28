@@ -52,6 +52,13 @@ export class CdcRuntime {
     };
   }
 
+  async decodeKey(
+    topic: string,
+    raw: Buffer,
+  ): Promise<Record<string, unknown>> {
+    return await this.decoder.decodeKey(topic, raw);
+  }
+
   /** Run an already decoded message through a handler chain. */
   async dispatch(
     envelope: CdcEnvelope,

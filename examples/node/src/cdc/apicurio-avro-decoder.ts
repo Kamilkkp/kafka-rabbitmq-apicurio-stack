@@ -9,54 +9,40 @@ import {
 import { debeziumAvroTypeOptions } from './avro-logical-types.js';
 
 /**
- * Decode Confluent-wire Avro via Apicurio **ccompat** (`@confluentinc/schemaregistry`,
- * the client Confluent ships with `@confluentinc/kafka-javascript`).
+ * One deserializer per writer schema, plus the first-decode lock.
  *
- * Requires Debezium `apicurio.registry.artifact.group-id=default` so nested
- * Value/Source refs resolve (Apicurio #5133). Longs → bigint, Debezium times → Date
- * via avsc options (SafeLong + logicalTypes) passed as `AvroSerdeConfig`.
+ * The very first decode of a schema is exclusive: the serde fetches referenced
+ * schemas before caching the built type, so concurrent decodes of one schema
+ * (RabbitMQ prefetch > 1) would both build it and the loser would hit
+ * `duplicate type name` on the shared avsc registry.
  */
-export class ApicurioAvroDecoder {
-  private readonly client: SchemaRegistryClient;
-  /** One deserializer per writer schema; see `debeziumAvroTypeOptions`. */
+class DeserializerCache {
   private readonly deserializers = new Map<string, AvroDeserializer>();
-  /** In-flight first decode per schema; see `decode`. */
   private readonly priming = new Map<string, Promise<void>>();
-  private readonly schemaIdReader: AvroDeserializer;
 
-  constructor(registryBaseUrl: string) {
-    this.client = new SchemaRegistryClient({
-      baseURLs: [`${registryBaseUrl.replace(/\/$/, '')}/apis/ccompat/v7`],
-    });
-    this.schemaIdReader = this.createDeserializer();
-  }
+  constructor(
+    private readonly client: SchemaRegistryClient,
+    private readonly serdeType: SerdeType,
+  ) {}
 
-  private createDeserializer(): AvroDeserializer {
-    return new AvroDeserializer(this.client, SerdeType.VALUE, {
+  create(): AvroDeserializer {
+    return new AvroDeserializer(this.client, this.serdeType, {
       ...debeziumAvroTypeOptions(),
-      // Default ASSOCIATED strategy calls a Confluent-only endpoint Apicurio lacks.
-      // TOPIC matches Debezium's TopicIdStrategy: <topic>-value.
+      // Default ASSOCIATED strategy calls a Confluent-only endpoint Apicurio
+      // lacks. TOPIC matches Debezium's TopicIdStrategy: `<topic>-value` and
+      // `<topic>-key`.
       subjectNameStrategyType: SubjectNameStrategyType.TOPIC,
     });
   }
 
-  /**
-   * Topic drives subject lookup for referenced schemas; the id still comes from
-   * the payload.
-   *
-   * The very first decode of a schema is exclusive. The serde fetches the
-   * referenced schemas before caching the built type, so concurrent decodes of
-   * one schema (RabbitMQ prefetch > 1) would both build it and the loser would
-   * hit `duplicate type name` on the shared avsc registry.
-   */
   async decode(
     topic: string,
     buffer: Buffer,
-  ): Promise<Record<string, unknown>> {
-    const schemaId = this.schemaIdOf(topic, buffer);
+    schemaId: string,
+  ): Promise<unknown> {
     let deserializer = this.deserializers.get(schemaId);
     if (deserializer == null) {
-      deserializer = this.createDeserializer();
+      deserializer = this.create();
       this.deserializers.set(schemaId, deserializer);
     }
 
@@ -73,14 +59,68 @@ export class ApicurioAvroDecoder {
           },
         ),
       );
-      return (await first) as Record<string, unknown>;
+      return await first;
     }
 
     await priming;
-    return (await deserializer.deserialize(topic, buffer)) as Record<
-      string,
-      unknown
-    >;
+    return await deserializer.deserialize(topic, buffer);
+  }
+}
+
+/**
+ * Decode Confluent-wire Avro via Apicurio **ccompat** (`@confluentinc/schemaregistry`,
+ * the client Confluent ships with `@confluentinc/kafka-javascript`).
+ *
+ * Requires Debezium `apicurio.registry.artifact.group-id=default` so nested
+ * Value/Source refs resolve (Apicurio #5133). Longs → bigint, Debezium times → Date
+ * via avsc options (SafeLong + logicalTypes) passed as `AvroSerdeConfig`.
+ */
+export class ApicurioAvroDecoder {
+  private readonly values: DeserializerCache;
+  private readonly keys: DeserializerCache;
+  private readonly schemaIdReader: AvroDeserializer;
+
+  constructor(registryBaseUrl: string) {
+    const client = new SchemaRegistryClient({
+      baseURLs: [`${registryBaseUrl.replace(/\/$/, '')}/apis/ccompat/v7`],
+    });
+    this.values = new DeserializerCache(client, SerdeType.VALUE);
+    this.keys = new DeserializerCache(client, SerdeType.KEY);
+    this.schemaIdReader = this.values.create();
+  }
+
+  /**
+   * Topic drives subject lookup for referenced schemas; the id still comes from
+   * the payload.
+   */
+  async decode(
+    topic: string,
+    buffer: Buffer,
+  ): Promise<Record<string, unknown>> {
+    const decoded = await this.values.decode(
+      topic,
+      buffer,
+      this.schemaIdOf(topic, buffer),
+    );
+    return decoded as Record<string, unknown>;
+  }
+
+  /**
+   * Decode a Kafka message key against `<topic>-key`. For Debezium this is the
+   * row identity: the primary key, or the columns `REPLICA IDENTITY` names.
+   */
+  async decodeKey(
+    topic: string,
+    buffer: Buffer,
+  ): Promise<Record<string, unknown>> {
+    const decoded = await this.keys.decode(
+      topic,
+      buffer,
+      // Key and value schema ids come from different subjects and can collide,
+      // so namespace the cache key.
+      `key:${this.schemaIdOf(topic, buffer)}`,
+    );
+    return decoded as Record<string, unknown>;
   }
 
   /**

@@ -1,7 +1,7 @@
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 
-import { cdcSourceOf } from '../cdc/cdc-handler.js';
+import { cdcSourceOf, type CdcEnvelope } from '../cdc/cdc-handler.js';
 import { CdcRuntime } from '../cdc/cdc-runtime.js';
 import { CdcTableSubscriber } from '../cdc/cdc-table-subscriber.js';
 import {
@@ -46,7 +46,11 @@ export class KafkaCdcRouter implements OnModuleInit {
   }
 
   async route(topic: string, raw: Buffer, messageId: string): Promise<void> {
-    const envelope = await this.runtime.decode(topic, raw, messageId);
+    await this.deliver(await this.runtime.decode(topic, raw, messageId));
+  }
+
+  /** Already decoded — used after the apply engine has accepted the record. */
+  async deliver(envelope: CdcEnvelope): Promise<void> {
     const source = cdcSourceOf(envelope.decoded);
     const subscriber = source ? this.bySource.get(source) : undefined;
     if (!subscriber) {
