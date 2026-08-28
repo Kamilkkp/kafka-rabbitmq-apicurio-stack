@@ -10,8 +10,8 @@ export type KafkaSubscriberConfig = {
 };
 
 /**
- * Marks a subscriber as the Kafka owner of one or more sources.
- * `KafkaCdcRouter` picks it up at boot, so replays go through the same class.
+ * Marks a processor as the owner of one or more Kafka CDC sources.
+ * `KafkaCdcRouter` picks it up at boot for pg-boss job dispatch.
  */
 export function KafkaSubscriber(config: KafkaSubscriberConfig) {
   return <T extends new (...args: never[]) => CdcTableSubscriber>(

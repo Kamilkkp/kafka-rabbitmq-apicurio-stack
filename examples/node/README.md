@@ -1,75 +1,75 @@
 # Node.js CDC consumer
 
-Standalone NestJS example that consumes Debezium Avro CDC through RabbitMQ.
-Kafka is used only by an optional startup replay publisher, which republishes
-the original Avro bytes to the same RabbitMQ exchange.
+NestJS example with a service-owned ingestion path:
 
-## Apply pattern (the part to copy)
+```text
+Kafka + Apicurio
+  -> generic Avro decode
+  -> PostgreSQL / pg-boss
+  -> table-specific Zod handler
+  -> LWW projection write
+```
 
-`src/apply/` is the reference projection, independent of Nest:
+RabbitMQ is not involved. Kafka is the shared CDC contract; pg-boss is local
+to this consumer and uses the consumer's own PostgreSQL database.
 
-The single rule is last-write-wins per `(table, pk)` on Debezium `source.lsn`.
-Nothing is buffered and deletes always execute where they appear.
+## Why enqueue before Zod
 
-Handlers run **inside** the gate, and the watermark advances only after they
-return. The watermark therefore records applied writes, not seen messages: a
-handler that throws leaves it untouched, the message is nacked, and the
-redelivery is not treated as stale. A child row whose parent has not arrived
-yet can simply fail and be retried until the parent's own queue catches up —
-no deferred foreign keys required, because every table has its own queue and
-they drain independently.
+The Kafka callback only:
 
-Nothing requires messages to be processed in order, so prefetch is not pinned
-to 1. Because the write sits between reading the watermark and moving it, the
-engine serializes work per `(table, pk)`; rows are independent, so concurrency
-is preserved. On SQL you get this for free from a single conditional upsert
-(`... WHERE excluded.lsn > projection.lsn`) or a row lock held for the
-transaction. Replay end markers may therefore overtake events still in flight,
-which is why they are logging only.
+1. decodes the Avro envelope and key through Apicurio;
+2. converts Avro `bigint` values to JSON-safe decimal strings;
+3. inserts a pg-boss job;
+4. commits the next Kafka offset.
 
-Failures do not requeue onto the working queue. The error handler confirm-
-publishes the original bytes and properties into a durable delay queue, then
-acknowledges the original; if that publish fails, only then does it requeue the
-original so the event cannot be lost. Queue TTLs produce the backoff
-`5s → 30s → 5m → 30m`, after which RabbitMQ dead-letters the message back to
-the original exchange and table routing key. It is parked in a durable,
-unconsumed `<prefix>.dlq.<source>` queue after 100 failed deliveries or three
-days since the first failure, whichever comes first. A working-queue message
-TTL is deliberately not used: that would expire a genuine backlog as happily
-as a poison message.
+No table-specific Zod schema runs before the job is durable. An incompatible
+application schema therefore retries in pg-boss and can eventually reach the
+service's DLQ without stopping the Kafka partition.
 
-| Mode | When | Stale event (`source.lsn`) |
-| --- | --- | --- |
-| `replay` | Kafka → RabbitMQ with `cdc-mode=replay` | `< watermark` skipped; `= watermark` deliberately reapplied |
-| `live` | regular bridge → RabbitMQ | `<= watermark` skipped |
+For live traffic the pg-boss job ID is a deterministic UUID derived from
+`topic/partition/offset`. If the process dies after the PostgreSQL commit but
+before the Kafka commit, Kafka redelivers the record and the duplicate job
+insert becomes a no-op. An explicit replay adds its run ID to that UUID input:
+duplicates within one run still collapse, while a later replay can deliberately
+execute `LSN == watermark` again.
 
-Events are applied one at a time, exactly as RabbitMQ delivers them. A delete
-that passes the LWW gate is applied and cascades — in the example, into
-`ReadModel.follows`, a stand-in for local user progress that is never in CDC.
-Consequence worth knowing: if the log still holds an intermediate delete for a
-row that a later event re-inserts, replay executes that delete, and the
-cascaded local row does not come back when the insert lands.
+## Processing and retries
 
-`npm test` covers these cases without Kafka.
+The queue uses pg-boss `key_strict_fifo` with a singleton key built from the
+Kafka topic and decoded Debezium key:
+
+- jobs for different rows run concurrently;
+- jobs for one row remain ordered;
+- a failed child row does not block its parent or unrelated rows;
+- retry begins at 5 seconds, uses exponential backoff, and is capped at
+  30 minutes;
+- after 100 retries the job moves to `cdc-events-dead-letter`;
+- DLQ jobs are retained in PostgreSQL for manual inspection and redrive.
+
+`src/apply/` demonstrates LWW per `(table, primary key)` on Debezium
+`source.lsn`. Live delivery requires `LSN > watermark`; replay also accepts
+equality so the latest known event is deliberately applied again. The
+watermark advances only after the handler succeeds.
+
+The demo read model and watermark store are in memory to keep the sample
+focused. A production implementation must store the projection and watermark
+atomically in its application database, for example with a conditional upsert
+or row lock in one transaction.
 
 ## Prerequisites
 
-From the repository root, start the demo stack:
+From the repository root:
 
 ```bash
 cp .env.demo.example .env
 docker compose -f compose.yaml -f compose.demo.yaml up --build -d
 ```
 
-Host endpoints this consumer uses:
+The consumer uses:
 
 - Kafka: `localhost:9092`
-- Apicurio (ccompat): `http://localhost:8081`
-- RabbitMQ AMQP: `localhost:5672` (`admin` / `admin` in the demo env)
-
-Kafka topics and RabbitMQ routing keys are `{database}.{schema}.{table}`,
-for example `sales.public.customers`. Avro subject lookup uses that same
-name (`<topic>-value`).
+- Apicurio: `http://localhost:8081`
+- service-owned PostgreSQL: `localhost:5435`, database `consumer`
 
 ## Run
 
@@ -80,44 +80,38 @@ npm install
 npm start
 ```
 
-`npm start` loads `.env` via `tsx --env-file=.env`. Watch mode: `npm run start:watch`.
+`npm start` loads `.env` through `tsx --env-file=.env`.
 
-Ongoing delivery is RabbitMQ-only. Set `CDC_KAFKA_REPLAY=true` to read the
-compacted Kafka table topics up to their startup high watermarks and publish
-them back to RabbitMQ with:
+Normal operation resumes the offsets stored for `CDC_KAFKA_GROUP_ID`. Set
+`CDC_KAFKA_REPLAY=true` for a one-shot startup replay from offset zero to the
+captured high watermarks; replay jobs are all enqueued before the live consumer
+starts.
 
-- `cdc-mode: replay`
-- `cdc-replay-id: <uuid>`
-- original Kafka topic, partition and offset
-- one `cdc-replay-end` marker per table queue, so `ReplayCoordinator` can log
-  when the replay has been fully consumed (reporting only, nothing waits on it)
-
-The application still compares Debezium `source.lsn`. During replay an event
-equal to the persisted watermark is intentionally executed again (projection
-rebuild); an event below it is stale and skipped. In live mode equality means
-redelivery and is skipped.
-
-Use a distinct `CDC_KAFKA_GROUP_ID` and `CDC_RABBITMQ_QUEUE` for every
+Use a unique `CDC_KAFKA_GROUP_ID` and PostgreSQL database/schema for every
 independent projection.
 
-## Config
+## Configuration
 
 | Variable | Role |
 | --- | --- |
 | `CDC_KAFKA_BROKERS` | Kafka bootstrap (`localhost:9092`) |
-| `CDC_KAFKA_GROUP_ID` | Consumer group used only during Kafka replay |
+| `CDC_KAFKA_GROUP_ID` | This projection's persistent live consumer group |
+| `CDC_KAFKA_CONCURRENCY` | Kafka partitions enqueued concurrently; default `4` |
 | `CDC_APICURIO_URL` | Registry base URL (`http://localhost:8081`) |
-| `CDC_TOPICS` | Optional explicit replay topics; default lists the broker and drops excluded ones |
-| `CDC_TOPIC_EXCLUDE` | Optional comma-separated regexes replacing the default infrastructure deny list |
-| `CDC_RABBITMQ_URL` | AMQP URL |
-| `CDC_RABBITMQ_EXCHANGE` | Topic exchange declared by the stack |
-| `CDC_RABBITMQ_QUEUE` | Queue name prefix; each source binds `<prefix>.<db.schema.table>` |
-| `CDC_RABBITMQ_PREFETCH` | Unacked messages in flight per consumer; defaults to `20`. Set `1` to process strictly in order |
-| `CDC_RABBITMQ_RETRY_MAX_ATTEMPTS` | Failed deliveries before parking; defaults to `100` |
-| `CDC_RABBITMQ_RETRY_MAX_AGE_MS` | Time since first failure before parking; defaults to `259200000` (3 days) |
-| `CDC_KAFKA_REPLAY` | `true` to replay Kafka from offset 0 before RabbitMQ |
+| `CDC_TOPICS` | Optional explicit replay topics; default is the registered processors |
+| `CDC_KAFKA_REPLAY` | `true` to enqueue offset-zero replay before live consumption |
+| `CDC_JOB_DATABASE_URL` | PostgreSQL connection used by pg-boss |
+| `CDC_JOB_CONCURRENCY` | Local pg-boss worker concurrency; default `20` |
+| `CDC_JOB_RETRY_LIMIT` | Retries before local DLQ; default `100` |
+| `CDC_JOB_RETRY_DELAY_SECONDS` | Initial retry delay; default `5` |
+| `CDC_JOB_RETRY_DELAY_MAX_SECONDS` | Backoff cap; default `1800` |
 
-Null Kafka values are tombstones and are handled without Avro decoding. The
-client talks to Apicurio over `ccompat` with `subjectNameStrategyType: TOPIC`.
-Recreating a Kafka topic invalidates its internal id; restart this consumer
-(and the bridge) if replay loops on `UNKNOWN_TOPIC_ID`.
+Kafka null values are tombstones and are committed without creating a job.
+Recreating a Kafka topic invalidates librdkafka's internal topic ID; restart
+the consumer if it reports `UNKNOWN_TOPIC_ID`.
+
+Run unit tests:
+
+```bash
+npm test
+```

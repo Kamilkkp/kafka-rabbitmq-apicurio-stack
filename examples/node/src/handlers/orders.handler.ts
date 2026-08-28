@@ -11,7 +11,8 @@ const orderRow = z
     customer_id: z.string(),
     status: z.string(),
     total_cents: z.number(),
-    created_at: z.date(),
+    // pg-boss JSONB preserves the instant as ISO text.
+    created_at: z.coerce.date(),
   })
   .passthrough();
 

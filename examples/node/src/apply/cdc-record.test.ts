@@ -57,6 +57,17 @@ describe('toCdcRecord', () => {
     assert.equal(record.lsn, 1_724_846_400_000n);
   });
 
+  it('restores an LSN serialized through pg-boss JSONB', () => {
+    const record = toCdcRecord(
+      envelope({
+        source: { ...envelope().source, lsn: '23461952' },
+      }),
+    );
+
+    assert.ok(record);
+    assert.equal(record.lsn, 23_461_952n);
+  });
+
   it('uses the decoded Kafka key for a composite primary key', () => {
     const identity = identityFromKey({
       warehouse_id: 'w1',

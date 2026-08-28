@@ -42,8 +42,16 @@ export function rowKey(row: Record<string, unknown>): string | null {
   return row.id != null ? String(row.id) : null;
 }
 
-/** Avro `long` decodes to bigint (see `SafeLong`); a plain int also fits. */
-const avroLong = z.union([z.bigint(), z.number().int().transform(BigInt)]);
+/**
+ * Avro `long` initially decodes to bigint (see `SafeLong`). pg-boss stores the
+ * generic decoded envelope as JSONB, so the worker receives the same value as
+ * a decimal string.
+ */
+const avroLong = z.union([
+  z.bigint(),
+  z.number().int().transform(BigInt),
+  z.string().regex(/^-?\d+$/).transform(BigInt),
+]);
 
 const rowSchema = z.record(z.unknown());
 

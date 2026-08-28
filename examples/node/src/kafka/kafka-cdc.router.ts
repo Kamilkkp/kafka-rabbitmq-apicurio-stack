@@ -1,6 +1,7 @@
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 
+import type { DeliveryMode } from '../apply/apply-engine.js';
 import { cdcSourceOf, type CdcEnvelope } from '../cdc/cdc-handler.js';
 import { CdcRuntime } from '../cdc/cdc-runtime.js';
 import { CdcTableSubscriber } from '../cdc/cdc-table-subscriber.js';
@@ -10,9 +11,7 @@ import {
 } from './kafka-subscriber.decorator.js';
 
 /**
- * Kafka counterpart of the RabbitMQ routing key: routes by `{db}.{table}` into
- * the same `@KafkaSubscriber` classes, so a replay after `seek` to the
- * beginning is handled exactly like a live message.
+ * Routes a durable pg-boss job by `{db}.{schema}.{table}` into its processor.
  */
 @Injectable()
 export class KafkaCdcRouter implements OnModuleInit {
@@ -45,18 +44,17 @@ export class KafkaCdcRouter implements OnModuleInit {
     return [...this.bySource.keys()];
   }
 
-  async route(topic: string, raw: Buffer, messageId: string): Promise<void> {
-    await this.deliver(await this.runtime.decode(topic, raw, messageId));
-  }
-
-  /** Already decoded — used after the apply engine has accepted the record. */
-  async deliver(envelope: CdcEnvelope): Promise<void> {
+  async process(
+    envelope: CdcEnvelope,
+    identity: string | null,
+    delivery: DeliveryMode,
+  ): Promise<void> {
     const source = cdcSourceOf(envelope.decoded);
     const subscriber = source ? this.bySource.get(source) : undefined;
     if (!subscriber) {
       await this.runtime.dispatch(envelope);
       return;
     }
-    await subscriber.consume(envelope);
+    await subscriber.process(envelope, identity, delivery);
   }
 }

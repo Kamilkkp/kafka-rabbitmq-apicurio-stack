@@ -3,10 +3,8 @@
 Standalone proof of concept that **reads Debezium Avro events from Kafka**
 and decodes them via Apicurio’s Confluent-compatible registry API.
 
-This example does **not** implement the Node consumer’s RabbitMQ handover
-(no AMQP client, no queue bind, no Kafka replay then switch to RabbitMQ).
-Live traffic on the stack is also bridged to RabbitMQ; this PoC ignores
-that path and polls Kafka only.
+Unlike the Node example, this PoC does not add a service-owned durable job
+queue. It decodes and handles records directly in the Kafka polling loop.
 
 Requires Debezium `artifact.group-id=default` so nested Envelope → Value /
 Source schema references resolve.

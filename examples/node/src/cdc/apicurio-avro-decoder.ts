@@ -12,8 +12,8 @@ import { debeziumAvroTypeOptions } from './avro-logical-types.js';
  * One deserializer per writer schema, plus the first-decode lock.
  *
  * The very first decode of a schema is exclusive: the serde fetches referenced
- * schemas before caching the built type, so concurrent decodes of one schema
- * (RabbitMQ prefetch > 1) would both build it and the loser would hit
+ * schemas before caching the built type, so concurrent Kafka partition reads
+ * would both build it and the loser would hit
  * `duplicate type name` on the shared avsc registry.
  */
 class DeserializerCache {

@@ -12,7 +12,7 @@ export type ApplyDecision =
  * Last-write-wins projection keyed by `(source, pk)`. The only question asked
  * per event is "was a newer version of this row already applied".
  *
- * - **live**: only a strictly newer `source.lsn` is applied, so a Rabbit
+ * - **live**: only a strictly newer `source.lsn` is applied, so a pg-boss
  *   redelivery or an out-of-order event is dropped.
  * - **replay**: an LSN *equal* to the watermark is applied again, so rebuilding
  *   from Kafka always re-executes the latest known event for every row. An

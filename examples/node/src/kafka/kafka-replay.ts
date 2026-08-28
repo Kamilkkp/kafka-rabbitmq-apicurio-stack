@@ -1,16 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
 import { KafkaJS } from '@confluentinc/kafka-javascript';
-import { AmqpConnection } from '@golevelup/nestjs-rabbitmq';
 import { Inject, Injectable } from '@nestjs/common';
 
-import { ReplayCoordinator } from '../apply/replay-coordinator.js';
-import {
-  cdcTopicOverride,
-  isCdcTableTopic,
-  rabbitExchange,
-  required,
-} from '../config.js';
+import { cdcTopicOverride, required } from '../config.js';
+import { CdcJobQueue } from '../job/cdc-job.queue.js';
+import { KafkaCdcRouter } from './kafka-cdc.router.js';
 
 /** librdkafka: -2 = beginning of the partition. */
 const OFFSET_BEGINNING = '-2';
@@ -20,16 +15,15 @@ function partitionKey(topic: string, partition: number): string {
 }
 
 /**
- * One-shot publisher from compacted per-table Kafka topics to the same
- * RabbitMQ exchange used for live traffic. Application handlers therefore
- * have exactly one ingestion path.
+ * Optional one-shot read from offset zero to the startup high watermarks.
+ * Jobs are enqueued before the live consumer starts, so pg-boss preserves
+ * same-row order while processing both replay and later live work.
  */
 @Injectable()
 export class KafkaReplay {
   constructor(
-    @Inject(AmqpConnection) private readonly amqp: AmqpConnection,
-    @Inject(ReplayCoordinator)
-    private readonly coordinator: ReplayCoordinator,
+    @Inject(CdcJobQueue) private readonly jobs: CdcJobQueue,
+    @Inject(KafkaCdcRouter) private readonly router: KafkaCdcRouter,
   ) {}
 
   async run(): Promise<void> {
@@ -38,7 +32,11 @@ export class KafkaReplay {
 
     const admin = kafka.admin({ 'bootstrap.servers': brokers });
     await admin.connect();
-    const topics = await discoverTopics(admin);
+    const topics = await existingTopics(
+      admin,
+      cdcTopicOverride ?? this.router.sources(),
+    );
+    const replayId = randomUUID();
     const pending = new Map<string, number>();
     for (const topic of topics) {
       const watermarks = await admin.fetchTopicOffsets(topic);
@@ -49,9 +47,6 @@ export class KafkaReplay {
       }
     }
     await admin.disconnect();
-
-    const replayId = randomUUID();
-    this.coordinator.begin(replayId, topics);
 
     if (pending.size > 0) {
       const consumer = kafka.consumer({
@@ -71,7 +66,7 @@ export class KafkaReplay {
       const drained = new Promise<void>((resolve) => (finish = resolve));
 
       console.log(
-        `replay ${replayId}: publishing up to ${[...pending]
+        `replay: enqueueing up to ${[...pending]
           .map(([key, offset]) => `${key}@${offset}`)
           .join(', ')}`,
       );
@@ -82,21 +77,13 @@ export class KafkaReplay {
           const last = pending.get(partitionKey(topic, partition));
 
           if (message.value !== null) {
-            await this.amqp.publish(rabbitExchange, topic, message.value, {
-              persistent: true,
-              contentType: 'application/avro',
-              messageId: `${topic}[${partition}]@${offset}`,
-              headers: {
-                'cdc-mode': 'replay',
-                'cdc-replay-id': replayId,
-                // Same row identity the bridge forwards; see bridge.yaml.
-                // amqplib omits a header whose value is undefined.
-                'kafka-key': message.key?.toString('base64'),
-                'kafka-topic': topic,
-                'kafka-partition': partition,
-                'kafka-offset': message.offset,
-              },
-            });
+            await this.jobs.enqueue(
+              { topic, partition, offset: message.offset },
+              message.value,
+              message.key,
+              'replay',
+              replayId,
+            );
           }
 
           if (last !== undefined && offset >= last) {
@@ -111,51 +98,24 @@ export class KafkaReplay {
       await drained;
       await consumer.disconnect();
     }
-
-    // One marker per routing key reaches the same durable queue after all
-    // replay data published for that table.
-    for (const topic of topics) {
-      await this.amqp.publish(rabbitExchange, topic, Buffer.alloc(0), {
-        persistent: true,
-        contentType: 'application/octet-stream',
-        headers: {
-          'cdc-mode': 'replay',
-          'cdc-replay-id': replayId,
-          'cdc-replay-end': true,
-          'kafka-topic': topic,
-        },
-      });
-    }
-
-    console.log(
-      `replay ${replayId}: published to RabbitMQ; waiting for queue markers`,
-    );
+    console.log('replay: all startup records are durable in pg-boss');
   }
 }
 
-/**
- * Mirrors the bridge: list everything the broker has and subtract
- * infrastructure topics, so a newly captured table needs no configuration.
- */
-async function discoverTopics(admin: {
-  listTopics: () => Promise<string[]>;
+/** Ignore owned topics not created by Debezium yet. */
+async function existingTopics(admin: {
   fetchTopicOffsets: (topic: string) => Promise<unknown>;
-}): Promise<string[]> {
-  if (cdcTopicOverride) {
-    const found: string[] = [];
-    for (const topic of cdcTopicOverride) {
-      try {
-        await admin.fetchTopicOffsets(topic);
-        found.push(topic);
-      } catch {
-        // Not created yet; Debezium may still be taking its initial snapshot.
-      }
+}, candidates: string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const topic of candidates) {
+    try {
+      await admin.fetchTopicOffsets(topic);
+      found.push(topic);
+    } catch {
+      // Not created yet; Debezium may still be taking its initial snapshot.
     }
-    return found;
   }
-
-  const topics = (await admin.listTopics()).filter(isCdcTableTopic);
-  return topics.sort();
+  return found.sort();
 }
 
 function splitPartitionKey(key: string): [string, number] {

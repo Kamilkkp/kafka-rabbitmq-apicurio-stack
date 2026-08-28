@@ -2,7 +2,7 @@ import type { z } from 'zod';
 
 export type DecodedCdcEvent = Record<string, unknown>;
 
-/** One decoded CDC message, whatever transport delivered it. */
+/** One decoded Kafka CDC message, reconstructed from a pg-boss job if needed. */
 export type CdcEnvelope = {
   /** Kafka topic that owns the Avro subject (`<topic>-value`). */
   topic: string;
@@ -12,7 +12,7 @@ export type CdcEnvelope = {
   decoded: DecodedCdcEvent;
 };
 
-/** `{database}.{schema}.{table}`, matching the RabbitMQ routing key. */
+/** `{database}.{schema}.{table}`, matching the Kafka topic. */
 export function cdcSourceOf(decoded: DecodedCdcEvent): string | undefined {
   const source = decoded.source;
   if (!source || typeof source !== 'object') {

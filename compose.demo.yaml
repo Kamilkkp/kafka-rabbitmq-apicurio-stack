@@ -59,6 +59,27 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Service-owned database used by the Node example for pg-boss jobs. In a real
+  # deployment this is the consumer's existing application database, not part
+  # of the shared Kafka/CDC infrastructure.
+  postgres-consumer:
+    image: postgres:16.10-alpine
+    ports:
+      - '5435:5432'
+    environment:
+      POSTGRES_DB: consumer
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-consumer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d consumer']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
   kafka-connect-init-sales:
     depends_on:
       postgres-sales:
@@ -74,3 +95,5 @@ volumes:
     name: ${CDC_SALES_VOLUME_NAME:-cdc-stack-sales-data}
   postgres-warehouse-data:
     name: ${CDC_WAREHOUSE_VOLUME_NAME:-cdc-stack-warehouse-data}
+  postgres-consumer-data:
+    name: ${CDC_CONSUMER_VOLUME_NAME:-cdc-stack-consumer-data}

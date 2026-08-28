@@ -1,25 +1,23 @@
-# Kafka, Debezium, Apicurio, and RabbitMQ CDC stack
+# Kafka, Debezium, and Apicurio CDC stack
 
-Standalone Docker Compose stack that streams PostgreSQL changes through:
+Standalone Docker Compose infrastructure that streams PostgreSQL changes:
 
 ```text
 PostgreSQL (external, one database per connector)
   -> Debezium on Kafka Connect
   -> one compacted Kafka topic per table (`{prefix}.{schema}.{table}`)
-  -> Redpanda Connect byte-for-byte bridge
-  -> RabbitMQ topic exchange (routing key = Kafka topic name)
+  -> application-owned Kafka consumer
 ```
 
-Apicurio stores Avro schemas, and Kafbat UI provides access to Kafka, Kafka
-Connect, and the registry.
+Apicurio stores the Avro schemas and Kafbat UI exposes Kafka, Kafka Connect,
+and the registry. There is intentionally no shared application broker:
+Kafka is the CDC contract and every service owns its consumer group, retry
+policy, dead-letter queue, and optional local job system.
 
-[`compose.yaml`](compose.yaml) is infrastructure only: Kafka, Connect,
-Apicurio, RabbitMQ, the bridge, and connector registration. It does **not**
-run PostgreSQL. Point the connectors at your own databases with environment
-variables.
-
-Sample sales and warehouse databases live in
-[`compose.demo.yaml`](compose.demo.yaml) for local exploration.
+[`compose.yaml`](compose.yaml) contains only shared CDC infrastructure. Point
+its connectors at real PostgreSQL databases with environment variables.
+[`compose.demo.yaml`](compose.demo.yaml) adds sample `sales` and `warehouse`
+sources plus a service-owned PostgreSQL used by the Node pg-boss example.
 
 ## Repository layout
 
@@ -29,34 +27,26 @@ Sample sales and warehouse databases live in
 ├── compose.demo.yaml
 ├── .env.example
 ├── .env.demo.example
-├── config/rabbitmq-bridge/
 ├── docker/apicurio/
 ├── docker/kafka-connect/
 ├── postgres/sales/
 ├── postgres/warehouse/
 └── examples/
-    ├── node/
-    └── python/
+    ├── node/    # Kafka -> pg-boss -> LWW projection
+    └── python/  # direct Kafka PoC
 ```
-
-- [`examples/node`](examples/node) — NestJS consumer: optional full Kafka
-  replay at startup (last-write-wins on `source.lsn`), then live delivery from
-  RabbitMQ.
-- [`examples/python`](examples/python) — Python consumer reading the compacted
-  per-table Kafka topics directly.
 
 ## Try it locally
 
-You need Docker Compose v2 and free host ports `9092`, `8081`–`8083`,
-`5672`, `15672`, `5433`, and `5434`. First start builds the Connect and
-Apicurio images and can take a few minutes.
+You need Docker Compose v2 and free host ports `9092`, `8081`–`8083`, and
+`5433`–`5435`.
 
 ```bash
 cp .env.demo.example .env
 docker compose -f compose.yaml -f compose.demo.yaml up --build -d
 ```
 
-Wait until both Debezium connectors are running (retry until `RUNNING`):
+Wait for Kafka and both connectors:
 
 ```bash
 docker compose -f compose.yaml -f compose.demo.yaml ps
@@ -70,16 +60,13 @@ Endpoints:
 - Apicurio: http://localhost:8081
 - Kafbat UI: http://localhost:8082
 - Kafka Connect REST: http://localhost:8083
-- RabbitMQ AMQP: `localhost:5672`
-- RabbitMQ management: http://localhost:15672
-- Demo DB `sales`: `localhost:5433` (`postgres` / `postgres`)
-- Demo DB `warehouse`: `localhost:5434` (`postgres` / `postgres`)
-
-See [UIs and tools](#uis-and-tools) for logins and which of these are browsers.
+- demo DB `sales`: `localhost:5433` (`postgres` / `postgres`)
+- demo DB `warehouse`: `localhost:5434` (`postgres` / `postgres`)
+- Node consumer DB: `localhost:5435` (`postgres` / `postgres`)
 
 Snapshot rows from `sales` (`customers`, `orders`, `order_items`) and
-`warehouse` (`products`, `warehouses`, `stock_levels`) are already in the
-compacted topics. Trigger a live change:
+`warehouse` (`products`, `warehouses`, `stock_levels`) are already published.
+Trigger a live change:
 
 ```bash
 docker compose -f compose.yaml -f compose.demo.yaml exec postgres-sales \
@@ -87,67 +74,43 @@ docker compose -f compose.yaml -f compose.demo.yaml exec postgres-sales \
   "UPDATE customers SET full_name = 'Ada Byron' WHERE email = 'ada@example.test';"
 ```
 
-Watch the bridge, then inspect the event in Kafbat (`sales.public.customers`)
-or RabbitMQ (exchange `cdc.events`, routing key `sales.public.customers`):
+Inspect `sales.public.customers` in Kafbat, or start either consumer:
 
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml logs -f cdc-rabbitmq-bridge
-```
+- [`examples/node`](examples/node) — durable service-local processing with pg-boss
+- [`examples/python`](examples/python) — direct Kafka decoding PoC
 
-Optional consumers (stack must already be up):
-
-- [`examples/python`](examples/python) — read both Kafka topics
-- [`examples/node`](examples/node) — bind RabbitMQ queues and optionally replay Kafka
-
-Stop without deleting Kafka, RabbitMQ, or demo Postgres data:
+Stop without deleting Kafka or PostgreSQL data:
 
 ```bash
 docker compose -f compose.yaml -f compose.demo.yaml down
 ```
 
-Add `--volumes` only if you want a clean slate.
-
-After changing `docker/kafka-connect/postgres.config.json`, recreate the
-registration jobs with the same `-f` flags:
-
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml up -d --build --force-recreate \
-  kafka-connect-init-sales kafka-connect-init-warehouse
-```
+Add `--volumes` only for a clean slate.
 
 ## UIs and tools
 
-All of these bind on the host when the stack is up. Demo logins match
-`.env.demo.example`; on a real deploy they come from `.env`.
-
-| Service | Address | UI tool | Login |
+| Service | Address | Browser UI | Login |
 | --- | --- | --- | --- |
 | Kafka | `localhost:9092` | no | — |
-| Apicurio Registry | http://localhost:8081 (UI: http://localhost:8081/ui) | yes | none |
+| Apicurio Registry | http://localhost:8081/ui | yes | none |
 | Kafbat UI | http://localhost:8082 | yes | `admin` / `admin` |
 | Kafka Connect REST | http://localhost:8083 | no | — |
-| RabbitMQ AMQP | `localhost:5672` | no | `admin` / `admin` |
-| RabbitMQ management | http://localhost:15672 | yes | `admin` / `admin` |
 
-Kafbat is the Kafka browser: per-table topics (`sales.public.customers`,
-`warehouse.public.products`, …), messages, Connectors, and the schema
-registry. Apicurio is the Avro registry (also
-http://localhost:8081/apis/ccompat/v7). RabbitMQ management shows the
-`cdc.events` topic exchange; queues appear only after an application binds
-them.
+Kafbat is the Kafka browser for per-table topics, messages, connectors, and
+registry schemas. Apicurio also exposes its Confluent-compatible endpoint at
+http://localhost:8081/apis/ccompat/v7.
 
-## Deploy the infrastructure
+## Deploy the shared infrastructure
 
-On a real host, use only [`compose.yaml`](compose.yaml). Copy
-[`.env.example`](.env.example) to `.env`, set the two PostgreSQL hostnames,
-credentials, publications, and slots, then:
+On a real host use only [`compose.yaml`](compose.yaml):
 
 ```bash
 cp .env.example .env
 docker compose up --build -d
 ```
 
-Each source database must have logical replication enabled:
+Set the two PostgreSQL hostnames, credentials, publications, and slots first.
+Each source database needs logical replication:
 
 ```text
 wal_level=logical
@@ -155,247 +118,107 @@ max_replication_slots>=1
 max_wal_senders>=1
 ```
 
-Create a replication role, `SELECT` grants, and a publication that match
-`CDC_*_SLOT_NAME` / `CDC_*_PUBLICATION_NAME` before the connectors start.
 [`postgres/sales/init/03_debezium.sql`](postgres/sales/init/03_debezium.sql)
 and [`postgres/warehouse/init/03_debezium.sql`](postgres/warehouse/init/03_debezium.sql)
-show the pattern.
+show the replication role, grants, and publication.
 
-### Replica identity
+After changing `docker/kafka-connect/postgres.config.json`, recreate connector
+registration jobs:
 
-Tables published for `UPDATE` and `DELETE` need a way for PostgreSQL logical
-replication to identify the changed row. Debezium also uses that identity as
-the Kafka record key.
-
-By default, replica identity is `DEFAULT`: PostgreSQL uses the primary key.
-If a table has no primary key, an `UPDATE` or `DELETE` on it fails with an
-error such as *cannot update table "…" because it does not have a replica
-identity and publishes updates*. `INSERT` still works.
-
-Typical fixes, from most common to least:
-
-1. Add a primary key (preferred). Compaction then has a stable key per row.
-2. `ALTER TABLE … REPLICA IDENTITY USING INDEX …` on a unique, non-partial,
-   non-deferrable index whose columns are `NOT NULL`.
-3. `ALTER TABLE … REPLICA IDENTITY FULL` — the whole old row is the identity.
-   Use this only when there is no natural unique key. It is heavier in WAL
-   and in Debezium payloads.
-
-Example with a made-up table that has no primary key:
-
-```sql
-CREATE TABLE public.course_waitlist (
-  course_id  uuid NOT NULL,
-  user_id    uuid NOT NULL,
-  joined_at  timestamptz NOT NULL DEFAULT now()
-);
+```bash
+docker compose -f compose.yaml -f compose.demo.yaml up -d --build --force-recreate \
+  kafka-connect-init-sales kafka-connect-init-warehouse
 ```
 
-Inserts replicate. Updating `joined_at` or deleting a row does not, until you
-pick an identity. Preferred:
+## Replica identity
+
+Tables published for `UPDATE` and `DELETE` need a stable row identity.
+Debezium uses the same identity as the Kafka record key.
+
+The default is the primary key. For a table without one:
+
+1. add a primary key (preferred);
+2. use `REPLICA IDENTITY USING INDEX` with a unique, non-partial,
+   non-deferrable index whose columns are `NOT NULL`;
+3. use `REPLICA IDENTITY FULL` only as a heavier last resort.
+
+For example:
 
 ```sql
 ALTER TABLE public.course_waitlist
   ADD PRIMARY KEY (course_id, user_id);
 ```
 
-If a unique constraint already exists and you cannot add a PK:
-
-```sql
-CREATE UNIQUE INDEX course_waitlist_course_user_uidx
-  ON public.course_waitlist (course_id, user_id);
-
-ALTER TABLE public.course_waitlist
-  REPLICA IDENTITY USING INDEX course_waitlist_course_user_uidx;
-```
-
-Last resort, when rows are not uniquely identifiable:
-
-```sql
-ALTER TABLE public.course_waitlist REPLICA IDENTITY FULL;
-```
-
-Check the current setting:
+Check the setting:
 
 ```sql
 SELECT n.nspname AS schema, c.relname AS table, c.relreplident
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relname = 'course_waitlist';
--- relreplident: d = DEFAULT (PK), i = index, f = FULL, n = NOTHING
+-- d = DEFAULT, i = index, f = FULL, n = NOTHING
 ```
 
 ## State and persistence
 
-Everything survives `docker compose down` and a restart; only
-`down --volumes` wipes it.
-
 | State | Where it lives | Volume |
 | --- | --- | --- |
-| Kafka topics (CDC data) | Kafka log dirs | `kafka-data` |
-| Kafka Connect configs, offsets, status | Kafka topics `cdc.connect-*` | `kafka-data` |
-| Debezium schema history | Kafka topic per connector | `kafka-data` |
-| Apicurio schemas | Kafka topic `kafkasql-journal` | `kafka-data` |
-| RabbitMQ queues, bindings, messages | RabbitMQ mnesia | `rabbitmq-data` |
-| Demo PostgreSQL data | Postgres data dir | `postgres-*-data` (demo only) |
+| Kafka CDC topics | Kafka log dirs | `kafka-data` |
+| Connect configs, offsets, status | `cdc.connect-*` topics | `kafka-data` |
+| Debezium schema history | topic per connector | `kafka-data` |
+| Apicurio schemas | `kafkasql-journal` | `kafka-data` |
+| Demo source data | PostgreSQL | `postgres-sales-data`, `postgres-warehouse-data` |
+| Node jobs and DLQ | service-owned PostgreSQL | `postgres-consumer-data` |
 
-Apicurio runs the KafkaSQL storage variant, so it has no disk of its own: it
-rebuilds the registry by replaying `kafkasql-journal` on every start.
+Apicurio uses KafkaSQL storage and rebuilds itself from `kafkasql-journal`.
 
 ## Event model
 
-- Each captured table gets its own compacted Kafka topic
-  (`{topic.prefix}.{schema}.{table}`, e.g. `sales.public.orders`).
-- Each topic has one partition and `cleanup.policy=compact` (Connect
-  topic creation). Parallelism is per table, not one global WAL order.
-- The RabbitMQ bridge consumes **every** topic minus infrastructure ones
-  (`__consumer_offsets`, `__transaction_state`, `__cluster_metadata`,
-  `kafkasql-journal`, `*.connect-{configs,offsets,statuses}`,
-  `*.schema-history`). Since a table topic always has three dot-separated
-  segments, none of those patterns can swallow one. It uses the **Kafka topic
-  name** as the AMQP routing key, so a new captured table — or a whole new
-  connector — flows through with no configuration change. The Kafka replay in
-  the Node example applies the same deny list.
-- Values are Avro in Confluent wire format (`0x00` plus schema ID and payload).
-- Schemas are registered per table (`QualifiedRecordIdStrategy`): Apicurio
-  shows `sales.public.orders.Envelope`, `warehouse.public.products.Key`,
-  and so on.
-- Delete tombstones stay in Kafka for compaction. The RabbitMQ bridge skips
-  tombstones because the preceding Debezium `op=d` event contains the delete.
+- Every captured table gets its own compacted topic, for example
+  `sales.public.orders`.
+- Topics have one partition in this demo. Ordering is per table; Kafka keys
+  preserve ordering for one row.
+- Values use Confluent-wire Avro (`0x00`, schema ID, payload).
+- Schemas are registered per table with `QualifiedRecordIdStrategy`, so
+  Apicurio shows distinct `sales.public.orders.Envelope`,
+  `warehouse.public.products.Key`, and similar artifacts.
+- The Kafka record key is the definitive row identity, including composite
+  primary keys.
+- Debezium emits a normal `op=d` envelope and then a null tombstone. Consumers
+  process the delete envelope and skip the tombstone.
 
-### Why Redpanda Connect and not a native RabbitMQ sink
+## Consumer ownership and replay
 
-Binary payloads are **not** the problem. Confluent's RabbitMQ sink keeps raw
-bytes with `value.converter=org.apache.kafka.connect.converters.ByteArrayConverter`
-(the Confluent Cloud variant defaults to it), and it can forward Kafka
-metadata and headers with `rabbitmq.forward.kafka.metadata` /
-`rabbitmq.forward.kafka.headers`. Confluent-wire Avro would survive intact.
+Every application uses its own Kafka consumer group. The shared stack neither
+knows nor operates application queues.
 
-Two other things rule it out for this stack:
+The Node example demonstrates the boundary:
 
-1. **The routing key is static.** `rabbitmq.routing.key` is one fixed value per
-   connector instance, with no interpolation from the topic name or a header.
-   With one topic per table, every event would land on `cdc.events` under the
-   same key, so `sales.public.*` bindings stop working. `rabbitmq.topic.queue.map`
-   maps a topic to a queue but publishes through the **default exchange**, which
-   gives up the topic exchange, wildcard bindings, and per-consumer fan-out.
-   The remaining option is one connector per table, which grows with every new
-   table.
-2. **It is proprietary.** The connector requires a Confluent license (30-day
-   trial, `_confluent-command` topic), so a public demo would stop working for
-   anyone cloning this repo. The community fork
-   (`com.github.themeetgroup.kafka.connect.rabbitmq`) drops the license but has
-   the same static exchange/routing-key limitation.
+1. Decode the generic Avro envelope and key through Apicurio. No table-specific
+   Zod schema runs on the Kafka path.
+2. Insert a JSON-safe job into service-owned pg-boss using a deterministic ID
+   derived from topic/partition/offset (plus a run ID for explicit replay).
+3. Commit the Kafka offset only after the PostgreSQL insert succeeds.
+4. Let pg-boss run table-specific Zod and business handlers. Handler failures
+   retry with exponential backoff and end in a local DLQ; Kafka keeps moving.
+5. Apply last-write-wins per `(table, primary key)` using Debezium `source.lsn`.
+   Move the watermark only after the projection write succeeds.
 
-Redpanda Connect consumes all topics minus an exclude list and sets the routing
-key per message from `meta("kafka_topic")`, so new tables need no configuration
-change.
+The deterministic live job ID closes the Kafka/PostgreSQL dual-write gap: a
+crash after enqueue but before offset commit causes redelivery, but the
+duplicate job insert is harmless. Replay gets a per-run namespace so another
+intentional replay can execute the same latest coordinate again.
 
-### Why not one compacted topic per database
+For a full replay, the Node example reads every table topic from offset zero up
+to startup high watermarks and enqueues those jobs before starting live
+consumption. Replay accepts `LSN == watermark` so the latest event is applied
+again; older events remain stale.
 
-A single topic preserves WAL order across tables, which used to be the
-only way to replay onto a database with immediate foreign keys. The Node
-example instead:
+Child-before-parent delivery does not require buffering the whole log. A child
+job can fail its foreign key and retry while the independent parent job
+succeeds. pg-boss uses `key_strict_fifo`, so one failed row blocks successors
+for that row but not unrelated rows.
 
-1. The replay publisher reads Kafka to startup high watermarks and republishes
-   unchanged Avro messages through the normal RabbitMQ exchange with
-   `cdc-mode=replay`.
-2. The Rabbit consumer applies LWW per `(table, pk)` using Debezium
-   `source.lsn`, and that is the whole rule: replay reapplies
-   `LSN == watermark` but skips `LSN < watermark`; live requires
-   `LSN > watermark`. Deletes execute where they appear; nothing is buffered
-   and events are applied one at a time, as RabbitMQ delivers them.
-3. The watermark moves **only after the write succeeded**, so it records applied
-   writes rather than seen messages. On SQL, keep the projection write and the
-   watermark update in one transaction.
-
-This avoids collapsing topics while keeping one application ingestion path:
-RabbitMQ.
-
-Because each table has its own queue, a child row that arrives before its
-parent does not need deferred foreign keys: let the insert fail, nack, and the
-redelivery retries while the parent's queue catches up independently. Children
-wait for parents and never the reverse, so this terminates unless the schema
-has a cycle.
-
-Nothing in this design needs in-order delivery, so consumers are free to use a
-prefetch above 1; what they do need is same-row work serialized, since the LWW
-check and the watermark update straddle the write.
-
-The Node example also bounds failures without blocking the working queue. Its
-error handler confirm-publishes the original message into durable TTL delay
-queues (`5s → 30s → 5m → 30m`) and acknowledges the working copy only after
-that publish succeeds. Each delay queue dead-letters back to the original
-exchange and table routing key. After 100 failed deliveries or three days from
-the first failure, whichever comes first, the message is parked in a durable
-`<prefix>.dlq.<source>` queue for inspection and manual redrive. A failed retry
-publish falls back to requeue, preserving at-least-once delivery. No TTL is set
-on the working queue because that would expire a genuine backlog as happily as
-a poison message.
-
-Cascades remain a genuine decision. Replaying an intermediate delete for a row
-that a later event re-inserts will fire `ON DELETE CASCADE`, and local-only rows
-(the example `follows` map, a stand-in for user progress) do not come back.
-
-## RabbitMQ routing keys (how to bind queues)
-
-The stack declares one durable **topic** exchange (`cdc.events` by default)
-and **no queues**. Developers declare their own queues and bind them to
-`cdc.events`.
-
-Routing key is `{database}.{schema}.{table}`, which is also the Kafka topic:
-
-| Change in | Kafka topic = RabbitMQ routing key |
-| --- | --- |
-| `sales.public.customers` | `sales.public.customers` |
-| `sales.public.orders` | `sales.public.orders` |
-| `sales.public.order_items` | `sales.public.order_items` |
-| `warehouse.public.products` | `warehouse.public.products` |
-| `warehouse.public.warehouses` | `warehouse.public.warehouses` |
-| `warehouse.public.stock_levels` | `warehouse.public.stock_levels` |
-
-`database` is Debezium `topic.prefix` (usually the Postgres database name).
-`schema` is the Postgres schema (`public` in the demo). The same table name
-in two schemas gets two routing keys.
-
-Because the exchange type is `topic`, `*` is one dot-separated word and `#`
-is everything after. Three-part keys need `#` (or `*.*.*` / `db.schema.*`),
-not `sales.*`:
-
-```text
-# One table only (typical projection)
-queue.declare  my-app.sales.orders
-queue.bind     my-app.sales.orders  ->  cdc.events  routing key "sales.public.orders"
-
-# Every table in sales.public
-queue.declare  my-app.sales.public
-queue.bind     my-app.sales.public   ->  cdc.events  routing key "sales.public.*"
-
-# Every table from the sales database (any schema)
-queue.declare  my-app.sales.all
-queue.bind     my-app.sales.all      ->  cdc.events  routing key "sales.#"
-
-# Every captured table from both Kafka topics
-queue.declare  my-app.cdc.all
-queue.bind     my-app.cdc.all       ->  cdc.events  routing key "#"
-```
-
-Give each application (or each independent projection) its **own durable
-queue name**. Two services binding the same queue compete for messages
-(competing consumers). Two services with different queue names each get a
-copy (pub/sub).
-
-AMQP headers on every message (hyphenated in RabbitMQ management):
-
-| Header | Meaning |
-| --- | --- |
-| `kafka-topic` | Same as the routing key / Kafka table topic (`sales.public.orders`) |
-| `kafka-key` | Base64-encoded Avro Kafka key; Debezium row identity decoded with `<topic>-key` |
-| `kafka-partition` / `kafka-offset` / `kafka-timestamp-ms` | Kafka coordinates |
-
-The body is the unchanged Confluent-wire Avro envelope. Decode with the
-schema id in the payload (Apicurio). The routing key and `kafka-topic`
-header are the same string.
-
-The bridge skips Kafka tombstones (`null` values). Deletes still arrive as
-a normal Avro event with `op=d` on the same routing key.
+One caveat remains independent of Kafka or the job system: replaying an
+intermediate parent delete executes `ON DELETE CASCADE`. Local-only dependent
+state does not reappear merely because a later CDC event re-inserts the parent.

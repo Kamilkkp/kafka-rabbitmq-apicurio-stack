@@ -165,61 +165,6 @@ services:
       DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
       DEBEZIUM_APICURIO_URL: http://apicurio:8080
 
-  rabbitmq:
-    image: rabbitmq:4.3.5-management-alpine
-    ports:
-      - '5672:5672'
-      - '15672:15672'
-    environment:
-      RABBITMQ_DEFAULT_USER: ${CDC_RABBITMQ_USER:-admin}
-      RABBITMQ_DEFAULT_PASS: ${CDC_RABBITMQ_PASSWORD:-admin}
-    volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
-    healthcheck:
-      test: ['CMD-SHELL', 'rabbitmq-diagnostics --quiet check_running && rabbitmq-diagnostics --quiet check_port_connectivity']
-      interval: 10s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
-    restart: unless-stopped
-
-  rabbitmq-init:
-    image: curlimages/curl:8.19.0
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        curl \
-          --silent \
-          --show-error \
-          --fail-with-body \
-          --user "${CDC_RABBITMQ_USER:-admin}:${CDC_RABBITMQ_PASSWORD:-admin}" \
-          --request PUT \
-          --header 'Content-Type: application/json' \
-          --data '{"type":"topic","durable":true,"auto_delete":false}' \
-          "http://rabbitmq:15672/api/exchanges/%2F/${CDC_RABBITMQ_EXCHANGE:-cdc.events}"
-        echo "Exchange ${CDC_RABBITMQ_EXCHANGE:-cdc.events} is configured."
-    restart: 'no'
-
-  cdc-rabbitmq-bridge:
-    image: docker.redpanda.com/redpandadata/connect:4.106.0
-    depends_on:
-      kafka:
-        condition: service_healthy
-      rabbitmq-init:
-        condition: service_completed_successfully
-    environment:
-      CDC_KAFKA_BROKER: kafka:29092
-      CDC_CONSUMER_GROUP: ${CDC_RABBITMQ_CONSUMER_GROUP:-cdc-rabbitmq-bridge}
-      CDC_RABBITMQ_URL: amqp://${CDC_RABBITMQ_USER:-admin}:${CDC_RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
-      CDC_RABBITMQ_EXCHANGE: ${CDC_RABBITMQ_EXCHANGE:-cdc.events}
-    volumes:
-      - ./config/rabbitmq-bridge/bridge.yaml:/connect.yaml:ro
-    restart: unless-stopped
-
   kafbat-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
     ports:
@@ -252,5 +197,3 @@ networks:
 volumes:
   kafka-data:
     name: ${CDC_KAFKA_VOLUME_NAME:-cdc-stack-kafka-data}
-  rabbitmq-data:
-    name: ${CDC_RABBITMQ_VOLUME_NAME:-cdc-stack-rabbitmq-data}

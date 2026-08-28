@@ -4,9 +4,10 @@ import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from './app.module.js';
 import { kafkaReplayOnStart } from './config.js';
+import { CdcJobQueue } from './job/cdc-job.queue.js';
 import { KafkaCdcRouter } from './kafka/kafka-cdc.router.js';
+import { KafkaConsumer } from './kafka/kafka-consumer.js';
 import { KafkaReplay } from './kafka/kafka-replay.js';
-import { ReplayGate } from './kafka/replay-gate.js';
 
 async function main() {
   const app = await NestFactory.createApplicationContext(AppModule);
@@ -15,10 +16,11 @@ async function main() {
     `CDC consumer sources=${sources.join(', ') || 'none'} kafkaReplay=${kafkaReplayOnStart}`,
   );
 
+  await app.get(CdcJobQueue).start();
   if (kafkaReplayOnStart) {
     await app.get(KafkaReplay).run();
-    app.get(ReplayGate).finish();
   }
+  await app.get(KafkaConsumer).start();
 
   const stop = async () => {
     await app.close();
