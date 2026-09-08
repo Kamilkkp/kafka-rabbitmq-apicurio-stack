@@ -16,18 +16,8 @@
   "topic.creation.default.segment.ms": "3600000",
   "topic.creation.default.min.cleanable.dirty.ratio": "0.1",
   "topic.creation.default.delete.retention.ms": "86400000",
-  "key.converter": "io.apicurio.registry.utils.converter.AvroConverter",
-  "key.converter.apicurio.registry.auto-register": "true",
-  "key.converter.apicurio.registry.dereference-schema": "true",
-  "key.converter.apicurio.registry.headers.enabled": "false",
-  "key.converter.apicurio.registry.as-confluent": "true",
-  "key.converter.apicurio.registry.artifact-resolver-strategy": "io.apicurio.registry.serde.avro.strategy.QualifiedRecordIdStrategy",
-  "key.converter.apicurio.registry.artifact.group-id": "default",
-  "value.converter": "io.apicurio.registry.utils.converter.AvroConverter",
-  "value.converter.apicurio.registry.auto-register": "true",
-  "value.converter.apicurio.registry.dereference-schema": "true",
-  "value.converter.apicurio.registry.headers.enabled": "false",
-  "value.converter.apicurio.registry.as-confluent": "true",
-  "value.converter.apicurio.registry.artifact-resolver-strategy": "io.apicurio.registry.serde.avro.strategy.QualifiedRecordIdStrategy",
-  "value.converter.apicurio.registry.artifact.group-id": "default"
+  "key.converter": "io.confluent.connect.avro.AvroConverter",
+  "key.converter.auto.register.schemas": "true",
+  "value.converter": "io.confluent.connect.avro.AvroConverter",
+  "value.converter.auto.register.schemas": "true"
 }

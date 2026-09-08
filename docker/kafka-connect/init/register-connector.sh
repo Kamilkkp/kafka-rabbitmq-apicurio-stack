@@ -10,7 +10,7 @@ set -eu
 : "${DEBEZIUM_SOURCE_SLOT_NAME:?}"
 : "${DEBEZIUM_SOURCE_PUBLICATION_NAME:?}"
 : "${DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST:?}"
-: "${DEBEZIUM_APICURIO_URL:?}"
+: "${SCHEMA_REGISTRY_URL:?}"
 
 CONNECT_URL="${CONNECT_URL:-http://kafka-connect:8083}"
 CONNECTOR_NAME="${CONNECTOR_NAME:-postgres-cdc}"
@@ -37,12 +37,12 @@ until curl --silent --fail "$CONNECT_URL/connector-plugins" >/dev/null; do
   sleep 1
 done
 
-echo "Waiting for Apicurio Registry..."
+echo "Waiting for Schema Registry..."
 attempt=0
-until curl --silent --fail "$DEBEZIUM_APICURIO_URL/health/ready" >/dev/null; do
+until curl --silent --fail "$SCHEMA_REGISTRY_URL/subjects" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 120 ]; then
-    echo "Apicurio Registry did not become ready." >&2
+    echo "Schema Registry did not become ready." >&2
     exit 1
   fi
   sleep 1
@@ -62,7 +62,7 @@ jq \
   --arg table_exclude_list "$TABLE_EXCLUDE_LIST" \
   --arg column_exclude_list "$COLUMN_EXCLUDE_LIST" \
   --arg schema_history_topic "$SCHEMA_HISTORY_TOPIC" \
-  --arg apicurio_url "$DEBEZIUM_APICURIO_URL/apis/registry/v2" \
+  --arg schema_registry_url "$SCHEMA_REGISTRY_URL" \
   '
     . + {
       "database.hostname": $database_hostname,
@@ -75,8 +75,8 @@ jq \
       "publication.name": $publication_name,
       "schema.include.list": $schema_include_list,
       "schema.history.internal.kafka.topic": $schema_history_topic,
-      "key.converter.apicurio.registry.url": $apicurio_url,
-      "value.converter.apicurio.registry.url": $apicurio_url
+      "key.converter.schema.registry.url": $schema_registry_url,
+      "value.converter.schema.registry.url": $schema_registry_url
     }
     | if $table_include_list != "" then .["table.include.list"] = $table_include_list else . end
     | if $table_exclude_list != "" then .["table.exclude.list"] = $table_exclude_list else . end

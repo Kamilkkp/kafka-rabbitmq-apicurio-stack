@@ -3,7 +3,7 @@
 NestJS example with a service-owned ingestion path:
 
 ```text
-Kafka + Apicurio
+Kafka + Schema Registry
   -> generic Avro decode
   -> PostgreSQL / pg-boss
   -> table-specific Zod handler
@@ -17,7 +17,7 @@ to this consumer and uses the consumer's own PostgreSQL database.
 
 The Kafka callback only:
 
-1. decodes the Avro envelope and key through Apicurio;
+1. decodes the Avro envelope and key through Schema Registry;
 2. converts Avro `bigint` values to JSON-safe decimal strings;
 3. inserts a pg-boss job;
 4. commits the next Kafka offset.
@@ -68,7 +68,7 @@ docker compose -f compose.yaml -f compose.demo.yaml up --build -d
 The consumer uses:
 
 - Kafka: `localhost:9092`
-- Apicurio: `http://localhost:8081`
+- Schema Registry: `http://localhost:8081`
 - service-owned PostgreSQL: `localhost:5435`, database `consumer`
 
 ## Run
@@ -97,7 +97,7 @@ independent projection.
 | `CDC_KAFKA_BROKERS` | Kafka bootstrap (`localhost:9092`) |
 | `CDC_KAFKA_GROUP_ID` | This projection's persistent live consumer group |
 | `CDC_KAFKA_CONCURRENCY` | Kafka partitions enqueued concurrently; default `4` |
-| `CDC_APICURIO_URL` | Registry base URL (`http://localhost:8081`) |
+| `CDC_SCHEMA_REGISTRY_URL` | Schema Registry URL (`http://localhost:8081`) |
 | `CDC_TOPICS` | Optional explicit replay topics; default is the registered processors |
 | `CDC_KAFKA_REPLAY` | `true` to enqueue offset-zero replay before live consumption |
 | `CDC_JOB_DATABASE_URL` | PostgreSQL connection used by pg-boss |

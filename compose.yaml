@@ -5,8 +5,8 @@ x-connect-init: &connect-init
     context: ./docker/kafka-connect
     dockerfile: init/Dockerfile
   depends_on:
-    apicurio:
-      condition: service_started
+    schema-registry:
+      condition: service_healthy
     kafka-connect:
       condition: service_healthy
   extra_hosts:
@@ -15,7 +15,7 @@ x-connect-init: &connect-init
 
 services:
   kafka:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     ports:
       - '9092:9092'
     environment:
@@ -53,44 +53,29 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  kafka-init:
-    image: apache/kafka:4.1.1
+  schema-registry:
+    image: confluentinc/cp-schema-registry:8.3.1
+    ports:
+      - '8081:8081'
     depends_on:
       kafka:
         condition: service_healthy
-    command:
-      - /bin/bash
-      - -ec
-      - |
-        /opt/kafka/bin/kafka-topics.sh \
-          --bootstrap-server kafka:29092 \
-          --create \
-          --if-not-exists \
-          --topic kafkasql-journal \
-          --partitions 1 \
-          --replication-factor 1 \
-          --config cleanup.policy=compact
-    restart: 'no'
-
-  apicurio:
-    build:
-      context: ./docker/apicurio
-    ports:
-      - '8081:8080'
-    depends_on:
-      kafka-init:
-        condition: service_completed_successfully
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      REGISTRY_KAFKASQL_TOPIC: kafkasql-journal
-      REGISTRY_KAFKASQL_TOPIC_AUTO_CREATE: 'false'
-      # No REGISTRY_KAFKASQL_CONSUMER_GROUP_ID on purpose. KafkaSQL keeps its
-      # whole state in memory and rebuilds it by replaying the journal, so a
-      # fixed group id makes a restarted instance resume from the committed
-      # offset and come up with an empty registry.
-      REGISTRY_UI_CONFIG_APIURL: /apis/registry
-      REGISTRY_UI_CONFIG_UIURL: /ui
-      JAVA_OPTS_APPEND: ${CDC_APICURIO_JAVA_OPTS:--Xms128m -Xmx384m}
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: '1'
+      SCHEMA_REGISTRY_HEAP_OPTS: ${CDC_SCHEMA_REGISTRY_HEAP_OPTS:--Xms128m -Xmx384m}
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081 && printf \"GET /subjects HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"HTTP/1.1 200\" <&3'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
     restart: unless-stopped
 
   kafka-connect:
@@ -115,7 +100,6 @@ services:
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: 'false'
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: 'false'
       CONNECT_TOPIC_CREATION_ENABLE: 'true'
-      ENABLE_APICURIO_CONVERTERS: 'true'
       HEAP_OPTS: ${CDC_KAFKA_CONNECT_HEAP_OPTS:--Xms256m -Xmx768m}
     healthcheck:
       test: ['CMD-SHELL', 'curl --fail --silent http://localhost:8083/connector-plugins >/dev/null']
@@ -143,7 +127,7 @@ services:
       DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_SALES_TABLE_INCLUDE_LIST:-}
       DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_SALES_TABLE_EXCLUDE_LIST:-}
       DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_SALES_COLUMN_EXCLUDE_LIST:-}
-      DEBEZIUM_APICURIO_URL: http://apicurio:8080
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafka-connect-init-warehouse:
     <<: *connect-init
@@ -163,7 +147,7 @@ services:
       DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_INCLUDE_LIST:-}
       DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_EXCLUDE_LIST:-}
       DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
-      DEBEZIUM_APICURIO_URL: http://apicurio:8080
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafbat-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
@@ -174,12 +158,12 @@ services:
         condition: service_healthy
       kafka-connect:
         condition: service_healthy
-      apicurio:
-        condition: service_started
+      schema-registry:
+        condition: service_healthy
     environment:
       KAFKA_CLUSTERS_0_NAME: ${CDC_KAFBAT_CLUSTER_NAME:-cdc}
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://apicurio:8080/apis/ccompat/v6
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       KAFKA_CLUSTERS_0_DEFAULTKEYSERDE: SchemaRegistry
       KAFKA_CLUSTERS_0_DEFAULTVALUESERDE: SchemaRegistry
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: ${CDC_CONNECT_GROUP_ID:-cdc-connect}

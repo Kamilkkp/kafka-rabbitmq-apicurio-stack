@@ -28,9 +28,8 @@ class DeserializerCache {
   create(): AvroDeserializer {
     return new AvroDeserializer(this.client, this.serdeType, {
       ...debeziumAvroTypeOptions(),
-      // Default ASSOCIATED strategy calls a Confluent-only endpoint Apicurio
-      // lacks. TOPIC matches Debezium's TopicIdStrategy: `<topic>-value` and
-      // `<topic>-key`.
+      // TopicNameStrategy: `<topic>-value` and `<topic>-key`. That is the
+      // Confluent AvroConverter default and matches per-table CDC topics.
       subjectNameStrategyType: SubjectNameStrategyType.TOPIC,
     });
   }
@@ -68,21 +67,20 @@ class DeserializerCache {
 }
 
 /**
- * Decode Confluent-wire Avro via Apicurio **ccompat** (`@confluentinc/schemaregistry`,
- * the client Confluent ships with `@confluentinc/kafka-javascript`).
+ * Decode Confluent-wire Avro (`@confluentinc/schemaregistry`, the client
+ * Confluent ships with `@confluentinc/kafka-javascript`).
  *
- * Requires Debezium `apicurio.registry.artifact.group-id=default` so nested
- * Value/Source refs resolve (Apicurio #5133). Longs → bigint, Debezium times → Date
- * via avsc options (SafeLong + logicalTypes) passed as `AvroSerdeConfig`.
+ * Longs → bigint, Debezium times → Date via avsc options (SafeLong +
+ * logicalTypes) passed as `AvroSerdeConfig`.
  */
-export class ApicurioAvroDecoder {
+export class ConfluentAvroDecoder {
   private readonly values: DeserializerCache;
   private readonly keys: DeserializerCache;
   private readonly schemaIdReader: AvroDeserializer;
 
-  constructor(registryBaseUrl: string) {
+  constructor(registryUrl: string) {
     const client = new SchemaRegistryClient({
-      baseURLs: [`${registryBaseUrl.replace(/\/$/, '')}/apis/ccompat/v7`],
+      baseURLs: [registryUrl.replace(/\/$/, '')],
     });
     this.values = new DeserializerCache(client, SerdeType.VALUE);
     this.keys = new DeserializerCache(client, SerdeType.KEY);

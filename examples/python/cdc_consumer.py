@@ -1,7 +1,5 @@
 """
-CDC consumer (Python) — Kafka + Apicurio ccompat via confluent-kafka.
-
-Requires Debezium `artifact.group-id=default` (nested Value/Source refs).
+CDC consumer (Python) — Kafka + Confluent Schema Registry via confluent-kafka.
 
   pip install -r requirements.txt
   set -a && source .env && set +a
@@ -40,11 +38,10 @@ def required(name: str) -> str:
 
 
 class ConfluentAvroDecoder:
-    """Ready-made Confluent AvroDeserializer against Apicurio ccompat."""
+    """Ready-made Confluent AvroDeserializer against Schema Registry."""
 
     def __init__(self) -> None:
-        base = required("CDC_APICURIO_URL").rstrip("/")
-        config = {"url": f"{base}/apis/ccompat/v7"}
+        config = {"url": required("CDC_SCHEMA_REGISTRY_URL").rstrip("/")}
         self._sr = DebeziumSchemaRegistryClient(config)
         self._deserializer = AvroDeserializer(self._sr)
 

@@ -1,4 +1,4 @@
-import { ApicurioAvroDecoder } from './apicurio-avro-decoder.js';
+import { ConfluentAvroDecoder } from './confluent-avro-decoder.js';
 import type {
   CdcEnvelope,
   CdcHandler,
@@ -27,11 +27,11 @@ function jsonSafe(_key: string, value: unknown): unknown {
 }
 
 export class CdcRuntime {
-  private readonly decoder: ApicurioAvroDecoder;
+  private readonly decoder: ConfluentAvroDecoder;
   private readonly matchCache = new ZodMatchCache();
 
-  constructor(apicurioUrl: string) {
-    this.decoder = new ApicurioAvroDecoder(apicurioUrl);
+  constructor(schemaRegistryUrl: string) {
+    this.decoder = new ConfluentAvroDecoder(schemaRegistryUrl);
   }
 
   handlerIds(handlers: CdcHandler[] = defaultCdcHandlers): string[] {

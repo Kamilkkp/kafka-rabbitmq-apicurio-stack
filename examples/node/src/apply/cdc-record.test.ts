@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { identityFromKey, toCdcRecord } from './cdc-record.js';
 
-/** Shape the Apicurio Avro decoder produces: Avro longs arrive as bigint. */
+/** Shape the Confluent Avro decoder produces: Avro longs arrive as bigint. */
 function envelope(overrides: Record<string, unknown> = {}) {
   return {
     op: 'u',

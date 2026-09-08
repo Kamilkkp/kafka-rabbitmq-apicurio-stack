@@ -1,13 +1,10 @@
 # Python CDC consumer (PoC)
 
 Standalone proof of concept that **reads Debezium Avro events from Kafka**
-and decodes them via Apicurio’s Confluent-compatible registry API.
+and decodes them via Confluent Schema Registry.
 
 Unlike the Node example, this PoC does not add a service-owned durable job
 queue. It decodes and handles records directly in the Kafka polling loop.
-
-Requires Debezium `artifact.group-id=default` so nested Envelope → Value /
-Source schema references resolve.
 
 ## Stack endpoints (localhost)
 
@@ -22,8 +19,8 @@ This consumer talks to:
 
 | Service  | URL |
 |----------|-----|
-| Kafka    | `localhost:9092` |
-| Apicurio | `http://localhost:8081` (`/apis/ccompat/v7`) |
+| Kafka            | `localhost:9092` |
+| Schema Registry  | `http://localhost:8081` |
 
 Default compacted CDC topics are one per table, for example
 `sales.public.customers` and `warehouse.public.products`.
@@ -70,7 +67,7 @@ exits with `Missing env <name>`:
 |----------|-------|
 | `CDC_KAFKA_BROKERS` | Bootstrap servers passed to librdkafka |
 | `CDC_KAFKA_GROUP_ID` | Consumer group; use a fresh one to re-read from the start |
-| `CDC_APICURIO_URL` | Registry origin only; the client appends `/apis/ccompat/v7` |
+| `CDC_SCHEMA_REGISTRY_URL` | Schema Registry URL (`http://localhost:8081`) |
 
 The rest are optional:
 

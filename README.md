@@ -1,4 +1,4 @@
-# Kafka, Debezium, and Apicurio CDC stack
+# Kafka, Debezium, and Confluent Schema Registry CDC stack
 
 Standalone Docker Compose infrastructure that streams PostgreSQL changes:
 
@@ -9,10 +9,10 @@ PostgreSQL (external, one database per connector)
   -> application-owned Kafka consumer
 ```
 
-Apicurio stores the Avro schemas and Kafbat UI exposes Kafka, Kafka Connect,
-and the registry. There is intentionally no shared application broker:
-Kafka is the CDC contract and every service owns its consumer group, retry
-policy, dead-letter queue, and optional local job system.
+Confluent Schema Registry stores the Avro schemas and Kafbat UI exposes Kafka,
+Kafka Connect, and the registry. There is intentionally no shared application
+broker: Kafka is the CDC contract and every service owns its consumer group,
+retry policy, dead-letter queue, and optional local job system.
 
 [`compose.yaml`](compose.yaml) contains only shared CDC infrastructure. Point
 its connectors at real PostgreSQL databases with environment variables.
@@ -27,7 +27,6 @@ sources plus a service-owned PostgreSQL used by the Node pg-boss example.
 ├── compose.demo.yaml
 ├── .env.example
 ├── .env.demo.example
-├── docker/apicurio/
 ├── docker/kafka-connect/
 ├── postgres/sales/
 ├── postgres/warehouse/
@@ -57,7 +56,7 @@ curl -s http://localhost:8083/connectors/warehouse-postgres/status
 Endpoints:
 
 - Kafka: `localhost:9092`
-- Apicurio: http://localhost:8081
+- Schema Registry: http://localhost:8081
 - Kafbat UI: http://localhost:8082
 - Kafka Connect REST: http://localhost:8083
 - demo DB `sales`: `localhost:5433` (`postgres` / `postgres`)
@@ -92,13 +91,13 @@ Add `--volumes` only for a clean slate.
 | Service | Address | Browser UI | Login |
 | --- | --- | --- | --- |
 | Kafka | `localhost:9092` | no | — |
-| Apicurio Registry | http://localhost:8081/ui | yes | none |
+| Schema Registry | http://localhost:8081 | REST only | none |
 | Kafbat UI | http://localhost:8082 | yes | `admin` / `admin` |
 | Kafka Connect REST | http://localhost:8083 | no | — |
 
 Kafbat is the Kafka browser for per-table topics, messages, connectors, and
-registry schemas. Apicurio also exposes its Confluent-compatible endpoint at
-http://localhost:8081/apis/ccompat/v7.
+registry schemas. Schema Registry itself is the Confluent REST API at
+http://localhost:8081 (`/subjects`, `/schemas/ids/{id}`).
 
 ## Deploy the shared infrastructure
 
@@ -166,11 +165,11 @@ WHERE c.relname = 'course_waitlist';
 | Kafka CDC topics | Kafka log dirs | `kafka-data` |
 | Connect configs, offsets, status | `cdc.connect-*` topics | `kafka-data` |
 | Debezium schema history | topic per connector | `kafka-data` |
-| Apicurio schemas | `kafkasql-journal` | `kafka-data` |
+| Schema Registry subjects | `_schemas` topic | `kafka-data` |
 | Demo source data | PostgreSQL | `postgres-sales-data`, `postgres-warehouse-data` |
 | Node jobs and DLQ | service-owned PostgreSQL | `postgres-consumer-data` |
 
-Apicurio uses KafkaSQL storage and rebuilds itself from `kafkasql-journal`.
+Schema Registry stores Avro subjects in the compacted `_schemas` topic.
 
 ## Event model
 
@@ -179,9 +178,9 @@ Apicurio uses KafkaSQL storage and rebuilds itself from `kafkasql-journal`.
 - Topics have one partition in this demo. Ordering is per table; Kafka keys
   preserve ordering for one row.
 - Values use Confluent-wire Avro (`0x00`, schema ID, payload).
-- Schemas are registered per table with `QualifiedRecordIdStrategy`, so
-  Apicurio shows distinct `sales.public.orders.Envelope`,
-  `warehouse.public.products.Key`, and similar artifacts.
+- Subjects follow TopicNameStrategy, so each table is
+  `{topic}-key` / `{topic}-value` — for example
+  `sales.public.orders-value` and `warehouse.public.products-key`.
 - The Kafka record key is the definitive row identity, including composite
   primary keys.
 - Debezium emits a normal `op=d` envelope and then a null tombstone. Consumers
@@ -194,7 +193,7 @@ knows nor operates application queues.
 
 The Node example demonstrates the boundary:
 
-1. Decode the generic Avro envelope and key through Apicurio. No table-specific
+1. Decode the generic Avro envelope and key through Schema Registry. No table-specific
    Zod schema runs on the Kafka path.
 2. Insert a JSON-safe job into service-owned pg-boss using a deterministic ID
    derived from topic/partition/offset (plus a run ID for explicit replay).

@@ -1,5 +1,5 @@
 {
-  "name": "kafka-apicurio-pgboss-node-consumer",
+  "name": "kafka-schema-registry-pgboss-node-consumer",
   "private": true,
   "version": "0.0.1",
   "type": "module",
