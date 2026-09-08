@@ -67,7 +67,7 @@ docker compose -f compose.yaml -f compose.demo.yaml up --build -d
 
 The consumer uses:
 
-- Kafka: `localhost:9092`
+- Kafka: `localhost:9092` (`SASL_PLAINTEXT` / `SCRAM-SHA-512`)
 - Schema Registry: `http://localhost:8081`
 - service-owned PostgreSQL: `localhost:5435`, database `consumer`
 
@@ -82,29 +82,33 @@ npm start
 
 `npm start` loads `.env` through `tsx --env-file=.env`.
 
-Normal operation resumes the offsets stored for `CDC_KAFKA_GROUP_ID`. Set
-`CDC_KAFKA_REPLAY=true` for a one-shot startup replay from offset zero to the
+Normal operation resumes the offsets stored for `KAFKA_GROUP_ID`. Set
+`KAFKA_REPLAY=true` for a one-shot startup replay from offset zero to the
 captured high watermarks; replay jobs are all enqueued before the live consumer
 starts.
 
-Use a unique `CDC_KAFKA_GROUP_ID` and PostgreSQL database/schema for every
+Use a unique `KAFKA_GROUP_ID` and PostgreSQL database/schema for every
 independent projection.
 
 ## Configuration
 
 | Variable | Role |
 | --- | --- |
-| `CDC_KAFKA_BROKERS` | Kafka bootstrap (`localhost:9092`) |
-| `CDC_KAFKA_GROUP_ID` | This projection's persistent live consumer group |
-| `CDC_KAFKA_CONCURRENCY` | Kafka partitions enqueued concurrently; default `4` |
-| `CDC_SCHEMA_REGISTRY_URL` | Schema Registry URL (`http://localhost:8081`) |
-| `CDC_TOPICS` | Optional explicit replay topics; default is the registered processors |
-| `CDC_KAFKA_REPLAY` | `true` to enqueue offset-zero replay before live consumption |
-| `CDC_JOB_DATABASE_URL` | PostgreSQL connection used by pg-boss |
-| `CDC_JOB_CONCURRENCY` | Local pg-boss worker concurrency; default `20` |
-| `CDC_JOB_RETRY_LIMIT` | Retries before local DLQ; default `100` |
-| `CDC_JOB_RETRY_DELAY_SECONDS` | Initial retry delay; default `5` |
-| `CDC_JOB_RETRY_DELAY_MAX_SECONDS` | Backoff cap; default `1800` |
+| `KAFKA_BROKERS` | Kafka bootstrap (`localhost:9092`) |
+| `KAFKA_GROUP_ID` | This projection's persistent live consumer group; prefix `cdc-consumer` |
+| `KAFKA_SECURITY_PROTOCOL` | `SASL_PLAINTEXT` on this stack; `PLAINTEXT` only if the broker has no SASL |
+| `KAFKA_SASL_MECHANISM` | `SCRAM-SHA-512` |
+| `KAFKA_SASL_USERNAME` | Kafka principal (`cdc-consumer`) |
+| `KAFKA_SASL_PASSWORD` | Kafka password (`admin` in the demo) |
+| `KAFKA_CONCURRENCY` | Kafka partitions enqueued concurrently; default `4` |
+| `SCHEMA_REGISTRY_URL` | Schema Registry URL (`http://localhost:8081`) |
+| `KAFKA_TOPICS` | Optional explicit replay topics; default is the registered processors |
+| `KAFKA_REPLAY` | `true` to enqueue offset-zero replay before live consumption |
+| `JOB_DATABASE_URL` | PostgreSQL connection used by pg-boss |
+| `JOB_CONCURRENCY` | Local pg-boss worker concurrency; default `20` |
+| `JOB_RETRY_LIMIT` | Retries before local DLQ; default `100` |
+| `JOB_RETRY_DELAY_SECONDS` | Initial retry delay; default `5` |
+| `JOB_RETRY_DELAY_MAX_SECONDS` | Backoff cap; default `1800` |
 
 Kafka null values are tombstones and are committed without creating a job.
 Recreating a Kafka topic invalidates librdkafka's internal topic ID; restart

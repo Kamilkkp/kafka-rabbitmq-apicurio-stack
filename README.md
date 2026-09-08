@@ -55,7 +55,7 @@ curl -s http://localhost:8083/connectors/warehouse-postgres/status
 
 Endpoints:
 
-- Kafka: `localhost:9092`
+- Kafka: `localhost:9092` (`SASL_PLAINTEXT` / `SCRAM-SHA-512`, user `cdc-consumer` / `admin`)
 - Schema Registry: http://localhost:8081
 - Kafbat UI: http://localhost:8082
 - Kafka Connect REST: http://localhost:8083
@@ -90,7 +90,7 @@ Add `--volumes` only for a clean slate.
 
 | Service | Address | Browser UI | Login |
 | --- | --- | --- | --- |
-| Kafka | `localhost:9092` | no | — |
+| Kafka | `localhost:9092` | no | `SCRAM-SHA-512` (`cdc-consumer` / `admin`) |
 | Schema Registry | http://localhost:8081 | REST only | none |
 | Kafbat UI | http://localhost:8082 | yes | `admin` / `admin` |
 | Kafka Connect REST | http://localhost:8083 | no | — |
@@ -98,6 +98,34 @@ Add `--volumes` only for a clean slate.
 Kafbat is the Kafka browser for per-table topics, messages, connectors, and
 registry schemas. Schema Registry itself is the Confluent REST API at
 http://localhost:8081 (`/subjects`, `/schemas/ids/{id}`).
+
+## Kafka authentication
+
+Client listeners use `SASL_PLAINTEXT` and `SCRAM-SHA-512`. There is no TLS in
+this demo; production should use `SASL_SSL`.
+
+| Principal | Used by | Kafka ACL sketch |
+| --- | --- | --- |
+| `admin` | superuser | none (authorizer bypass) |
+| `connect` | Debezium / Kafka Connect | all on `sales.`, `warehouse.`, `cdc.`; group `cdc-connect`; cluster create/describe/alter |
+| `schema-registry` | Schema Registry | all on `_schemas`; group `schema-registry` |
+| `kafbat` | Kafbat UI Kafka client | read/describe topics and groups |
+| `cdc-consumer` | Node and Python examples | read `sales.` / `warehouse.`; groups `cdc-consumer*` and `example-*` |
+
+`KAFBAT_USER` is only the Kafbat **web** login. The Kafka principal is
+`KAFKA_KAFBAT_USER` (`kafbat`).
+
+The broker also has a docker-only `INTERNAL` PLAINTEXT listener on
+`kafka:29092`. Kafka requires that inter-broker listener in
+`advertised.listeners`, so it is advertised inside Compose but **not**
+published to the host. `User:ANONYMOUS` is a superuser there so
+`kafka-auth-init` can create SCRAM users and ACLs without baking credentials
+into `kafka-storage format`. Application clients must use `kafka:29094` or
+`localhost:9092`. Anyone on the Compose network can still reach `29092`
+without a password; treat that network as trusted.
+
+If you change listeners on an existing volume and Kafka will not start, remove
+only the Kafka volume (`cdc-stack-kafka-data`) and bring the stack up again.
 
 ## Deploy the shared infrastructure
 

@@ -3,6 +3,7 @@ import { Inject, Injectable, type OnApplicationShutdown } from '@nestjs/common';
 
 import { required } from '../config.js';
 import { CdcJobQueue } from '../job/cdc-job.queue.js';
+import { kafkaAuthConfig } from './kafka-auth.js';
 import { KafkaCdcRouter } from './kafka-cdc.router.js';
 
 /**
@@ -21,10 +22,11 @@ export class KafkaConsumer implements OnApplicationShutdown {
   async start(): Promise<void> {
     const kafka = new KafkaJS.Kafka();
     const consumer = kafka.consumer({
-      'bootstrap.servers': required('CDC_KAFKA_BROKERS'),
-      'group.id': required('CDC_KAFKA_GROUP_ID'),
+      'bootstrap.servers': required('KAFKA_BROKERS'),
+      'group.id': required('KAFKA_GROUP_ID'),
       'enable.auto.commit': false,
       'auto.offset.reset': 'earliest',
+      ...kafkaAuthConfig(),
     });
     this.consumer = consumer;
 
@@ -32,7 +34,7 @@ export class KafkaConsumer implements OnApplicationShutdown {
     await consumer.subscribe({ topics: this.router.sources() });
     await consumer.run({
       partitionsConsumedConcurrently: Number(
-        process.env.CDC_KAFKA_CONCURRENCY ?? 4,
+        process.env.KAFKA_CONCURRENCY ?? 4,
       ),
       eachMessage: async ({ topic, partition, message }) => {
         if (message.value !== null) {

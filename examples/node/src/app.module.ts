@@ -25,7 +25,7 @@ import { ProductsSubscriber } from './subscribers/products.subscriber.js';
   providers: [
     {
       provide: CdcRuntime,
-      useFactory: () => new CdcRuntime(required('CDC_SCHEMA_REGISTRY_URL')),
+      useFactory: () => new CdcRuntime(required('SCHEMA_REGISTRY_URL')),
     },
     KafkaCdcRouter,
     KafkaConsumer,

@@ -92,8 +92,8 @@ services:
 
 volumes:
   postgres-sales-data:
-    name: ${CDC_SALES_VOLUME_NAME:-cdc-stack-sales-data}
+    name: ${SALES_VOLUME_NAME:-cdc-stack-sales-data}
   postgres-warehouse-data:
-    name: ${CDC_WAREHOUSE_VOLUME_NAME:-cdc-stack-warehouse-data}
+    name: ${WAREHOUSE_VOLUME_NAME:-cdc-stack-warehouse-data}
   postgres-consumer-data:
-    name: ${CDC_CONSUMER_VOLUME_NAME:-cdc-stack-consumer-data}
+    name: ${CONSUMER_VOLUME_NAME:-cdc-stack-consumer-data}

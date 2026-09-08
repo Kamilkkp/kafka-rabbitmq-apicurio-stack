@@ -5,6 +5,7 @@ import { Inject, Injectable } from '@nestjs/common';
 
 import { cdcTopicOverride, required } from '../config.js';
 import { CdcJobQueue } from '../job/cdc-job.queue.js';
+import { kafkaAuthConfig } from './kafka-auth.js';
 import { KafkaCdcRouter } from './kafka-cdc.router.js';
 
 /** librdkafka: -2 = beginning of the partition. */
@@ -27,10 +28,13 @@ export class KafkaReplay {
   ) {}
 
   async run(): Promise<void> {
-    const brokers = required('CDC_KAFKA_BROKERS');
+    const brokers = required('KAFKA_BROKERS');
     const kafka = new KafkaJS.Kafka();
 
-    const admin = kafka.admin({ 'bootstrap.servers': brokers });
+    const admin = kafka.admin({
+      'bootstrap.servers': brokers,
+      ...kafkaAuthConfig(),
+    });
     await admin.connect();
     const topics = await existingTopics(
       admin,
@@ -51,9 +55,10 @@ export class KafkaReplay {
     if (pending.size > 0) {
       const consumer = kafka.consumer({
         'bootstrap.servers': brokers,
-        'group.id': `${required('CDC_KAFKA_GROUP_ID')}-replay`,
+        'group.id': `${required('KAFKA_GROUP_ID')}-replay`,
         'enable.auto.commit': false,
         'auto.offset.reset': 'earliest',
+        ...kafkaAuthConfig(),
       });
       await consumer.connect();
       await consumer.subscribe({ topics });

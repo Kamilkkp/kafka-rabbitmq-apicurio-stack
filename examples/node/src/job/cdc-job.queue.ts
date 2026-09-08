@@ -44,7 +44,7 @@ export type KafkaCoordinates = {
  */
 @Injectable()
 export class CdcJobQueue implements OnApplicationShutdown {
-  private readonly boss = new PgBoss(required('CDC_JOB_DATABASE_URL'));
+  private readonly boss = new PgBoss(required('JOB_DATABASE_URL'));
 
   constructor(
     @Inject(CdcRuntime) private readonly runtime: CdcRuntime,
@@ -60,17 +60,17 @@ export class CdcJobQueue implements OnApplicationShutdown {
     });
     await this.boss.createQueue(queueName, {
       policy: 'key_strict_fifo',
-      retryLimit: Number(process.env.CDC_JOB_RETRY_LIMIT ?? 100),
-      retryDelay: Number(process.env.CDC_JOB_RETRY_DELAY_SECONDS ?? 5),
+      retryLimit: Number(process.env.JOB_RETRY_LIMIT ?? 100),
+      retryDelay: Number(process.env.JOB_RETRY_DELAY_SECONDS ?? 5),
       retryBackoff: true,
-      retryDelayMax: Number(process.env.CDC_JOB_RETRY_DELAY_MAX_SECONDS ?? 1800),
+      retryDelayMax: Number(process.env.JOB_RETRY_DELAY_MAX_SECONDS ?? 1800),
       retentionSeconds: 4 * 24 * 60 * 60,
       deadLetter: deadLetterQueueName,
     });
     await this.boss.work(
       queueName,
       {
-        localConcurrency: Number(process.env.CDC_JOB_CONCURRENCY ?? 20),
+        localConcurrency: Number(process.env.JOB_CONCURRENCY ?? 20),
         pollingIntervalSeconds: 1,
       },
       async ([job]) => {

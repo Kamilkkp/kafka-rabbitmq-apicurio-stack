@@ -1,4 +1,4 @@
-name: ${CDC_STACK_NAME:-cdc-stack}
+name: ${STACK_NAME:-cdc-stack}
 
 x-connect-init: &connect-init
   build:
@@ -19,15 +19,26 @@ services:
     ports:
       - '9092:9092'
     environment:
-      CLUSTER_ID: ${CDC_KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
       KAFKA_NODE_ID: '1'
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://${CDC_KAFKA_ADVERTISED_HOST:-localhost}:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,SASL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,SASL://0.0.0.0:29094,EXTERNAL://0.0.0.0:9092
+      # INTERNAL must be advertised because it is the inter-broker listener.
+      # It is not published to the host. App clients use SASL or EXTERNAL.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,SASL://kafka:29094,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:9092
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_SASL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'false'
+      # ANONYMOUS is only the unadvertised INTERNAL/CONTROLLER path used to
+      # seed SCRAM users. Application listeners require a SCRAM principal.
+      KAFKA_SUPER_USERS: User:${KAFKA_ADMIN_USER:-admin};User:ANONYMOUS
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: '1'
       KAFKA_DEFAULT_REPLICATION_FACTOR: '1'
@@ -38,9 +49,10 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
       KAFKA_LOG_CLEANER_ENABLE: 'true'
-      KAFKA_HEAP_OPTS: ${CDC_KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
     volumes:
       - kafka-data:/var/lib/kafka/data
+      - ./docker/kafka-auth/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
       test:
         [
@@ -53,6 +65,30 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  kafka-auth-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_ADMIN_USER: ${KAFKA_ADMIN_USER:-admin}
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:-admin}
+      KAFKA_CONNECT_USER: ${KAFKA_CONNECT_USER:-connect}
+      KAFKA_CONNECT_PASSWORD: ${KAFKA_CONNECT_PASSWORD:-admin}
+      KAFKA_SCHEMA_REGISTRY_USER: ${KAFKA_SCHEMA_REGISTRY_USER:-schema-registry}
+      KAFKA_SCHEMA_REGISTRY_PASSWORD: ${KAFKA_SCHEMA_REGISTRY_PASSWORD:-admin}
+      KAFKA_KAFBAT_USER: ${KAFKA_KAFBAT_USER:-kafbat}
+      KAFKA_KAFBAT_PASSWORD: ${KAFKA_KAFBAT_PASSWORD:-admin}
+      KAFKA_CONSUMER_USER: ${KAFKA_CONSUMER_USER:-cdc-consumer}
+      KAFKA_CONSUMER_PASSWORD: ${KAFKA_CONSUMER_PASSWORD:-admin}
+      CONNECT_GROUP_ID: ${CONNECT_GROUP_ID:-cdc-connect}
+      SALES_TOPIC_PREFIX: ${SALES_TOPIC_PREFIX:-sales}
+      WAREHOUSE_TOPIC_PREFIX: ${WAREHOUSE_TOPIC_PREFIX:-warehouse}
+    volumes:
+      - ./docker/kafka-auth/init-acls.sh:/usr/local/bin/init-acls.sh:ro
+    command: ['/bin/bash', '/usr/local/bin/init-acls.sh']
+    restart: 'no'
+
   schema-registry:
     image: confluentinc/cp-schema-registry:8.3.1
     ports:
@@ -60,12 +96,17 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-auth-init:
+        condition: service_completed_successfully
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29094
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM: SCRAM-SHA-512
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_SCHEMA_REGISTRY_USER:-schema-registry}\" password=\"${KAFKA_SCHEMA_REGISTRY_PASSWORD:-admin}\";"
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: '1'
-      SCHEMA_REGISTRY_HEAP_OPTS: ${CDC_SCHEMA_REGISTRY_HEAP_OPTS:--Xms128m -Xmx384m}
+      SCHEMA_REGISTRY_HEAP_OPTS: ${SCHEMA_REGISTRY_HEAP_OPTS:--Xms128m -Xmx384m}
     healthcheck:
       test:
         [
@@ -86,12 +127,26 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-auth-init:
+        condition: service_completed_successfully
     environment:
-      BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: ${CDC_CONNECT_GROUP_ID:-cdc-connect}
-      CONFIG_STORAGE_TOPIC: ${CDC_CONNECT_CONFIG_TOPIC:-cdc.connect-configs}
-      OFFSET_STORAGE_TOPIC: ${CDC_CONNECT_OFFSET_TOPIC:-cdc.connect-offsets}
-      STATUS_STORAGE_TOPIC: ${CDC_CONNECT_STATUS_TOPIC:-cdc.connect-statuses}
+      BOOTSTRAP_SERVERS: kafka:29094
+      CONNECT_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_SASL_MECHANISM: SCRAM-SHA-512
+      CONNECT_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_CONNECT_USER:-connect}\" password=\"${KAFKA_CONNECT_PASSWORD:-admin}\";"
+      CONNECT_PRODUCER_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_PRODUCER_SASL_MECHANISM: SCRAM-SHA-512
+      CONNECT_PRODUCER_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_CONNECT_USER:-connect}\" password=\"${KAFKA_CONNECT_PASSWORD:-admin}\";"
+      CONNECT_CONSUMER_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_CONSUMER_SASL_MECHANISM: SCRAM-SHA-512
+      CONNECT_CONSUMER_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_CONNECT_USER:-connect}\" password=\"${KAFKA_CONNECT_PASSWORD:-admin}\";"
+      CONNECT_ADMIN_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_ADMIN_SASL_MECHANISM: SCRAM-SHA-512
+      CONNECT_ADMIN_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_CONNECT_USER:-connect}\" password=\"${KAFKA_CONNECT_PASSWORD:-admin}\";"
+      GROUP_ID: ${CONNECT_GROUP_ID:-cdc-connect}
+      CONFIG_STORAGE_TOPIC: ${CONNECT_CONFIG_TOPIC:-cdc.connect-configs}
+      OFFSET_STORAGE_TOPIC: ${CONNECT_OFFSET_TOPIC:-cdc.connect-offsets}
+      STATUS_STORAGE_TOPIC: ${CONNECT_STATUS_TOPIC:-cdc.connect-statuses}
       CONFIG_STORAGE_REPLICATION_FACTOR: '1'
       OFFSET_STORAGE_REPLICATION_FACTOR: '1'
       STATUS_STORAGE_REPLICATION_FACTOR: '1'
@@ -100,7 +155,7 @@ services:
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: 'false'
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: 'false'
       CONNECT_TOPIC_CREATION_ENABLE: 'true'
-      HEAP_OPTS: ${CDC_KAFKA_CONNECT_HEAP_OPTS:--Xms256m -Xmx768m}
+      HEAP_OPTS: ${CONNECT_HEAP_OPTS:--Xms256m -Xmx768m}
     healthcheck:
       test: ['CMD-SHELL', 'curl --fail --silent http://localhost:8083/connector-plugins >/dev/null']
       interval: 10s
@@ -113,40 +168,40 @@ services:
     <<: *connect-init
     environment:
       CONNECT_URL: http://kafka-connect:8083
-      CONNECTOR_NAME: ${CDC_SALES_CONNECTOR_NAME:-sales-postgres}
-      DATABASE_HOSTNAME: ${CDC_SALES_DATABASE_HOSTNAME:-sales-db.internal}
-      DATABASE_PORT: ${CDC_SALES_DATABASE_PORT:-5432}
-      DATABASE_DBNAME: ${CDC_SALES_DATABASE_DBNAME:-sales}
-      DEBEZIUM_DATABASE_USER: ${CDC_SALES_DATABASE_USER:-debezium}
-      DEBEZIUM_DATABASE_PASSWORD: ${CDC_SALES_DATABASE_PASSWORD:-admin}
-      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${CDC_SALES_TOPIC_PREFIX:-sales}
-      DEBEZIUM_SOURCE_SLOT_NAME: ${CDC_SALES_SLOT_NAME:-sales_debezium}
-      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${CDC_SALES_PUBLICATION_NAME:-sales_debezium_pub}
-      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${CDC_SALES_SCHEMA_HISTORY_TOPIC:-sales.schema-history}
-      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${CDC_SALES_SCHEMA_INCLUDE_LIST:-public}
-      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_SALES_TABLE_INCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_SALES_TABLE_EXCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_SALES_COLUMN_EXCLUDE_LIST:-}
+      CONNECTOR_NAME: ${SALES_CONNECTOR_NAME:-sales-postgres}
+      DATABASE_HOSTNAME: ${SALES_DATABASE_HOSTNAME:-sales-db.internal}
+      DATABASE_PORT: ${SALES_DATABASE_PORT:-5432}
+      DATABASE_DBNAME: ${SALES_DATABASE_DBNAME:-sales}
+      DEBEZIUM_DATABASE_USER: ${SALES_DATABASE_USER:-debezium}
+      DEBEZIUM_DATABASE_PASSWORD: ${SALES_DATABASE_PASSWORD:-admin}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${SALES_TOPIC_PREFIX:-sales}
+      DEBEZIUM_SOURCE_SLOT_NAME: ${SALES_SLOT_NAME:-sales_debezium}
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${SALES_PUBLICATION_NAME:-sales_debezium_pub}
+      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${SALES_SCHEMA_HISTORY_TOPIC:-sales.schema-history}
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${SALES_SCHEMA_INCLUDE_LIST:-public}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${SALES_TABLE_INCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${SALES_TABLE_EXCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${SALES_COLUMN_EXCLUDE_LIST:-}
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafka-connect-init-warehouse:
     <<: *connect-init
     environment:
       CONNECT_URL: http://kafka-connect:8083
-      CONNECTOR_NAME: ${CDC_WAREHOUSE_CONNECTOR_NAME:-warehouse-postgres}
-      DATABASE_HOSTNAME: ${CDC_WAREHOUSE_DATABASE_HOSTNAME:-warehouse-db.internal}
-      DATABASE_PORT: ${CDC_WAREHOUSE_DATABASE_PORT:-5432}
-      DATABASE_DBNAME: ${CDC_WAREHOUSE_DATABASE_DBNAME:-warehouse}
-      DEBEZIUM_DATABASE_USER: ${CDC_WAREHOUSE_DATABASE_USER:-debezium}
-      DEBEZIUM_DATABASE_PASSWORD: ${CDC_WAREHOUSE_DATABASE_PASSWORD:-admin}
-      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${CDC_WAREHOUSE_TOPIC_PREFIX:-warehouse}
-      DEBEZIUM_SOURCE_SLOT_NAME: ${CDC_WAREHOUSE_SLOT_NAME:-warehouse_debezium}
-      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${CDC_WAREHOUSE_PUBLICATION_NAME:-warehouse_debezium_pub}
-      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${CDC_WAREHOUSE_SCHEMA_HISTORY_TOPIC:-warehouse.schema-history}
-      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${CDC_WAREHOUSE_SCHEMA_INCLUDE_LIST:-public}
-      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_INCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${CDC_WAREHOUSE_TABLE_EXCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${CDC_WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
+      CONNECTOR_NAME: ${WAREHOUSE_CONNECTOR_NAME:-warehouse-postgres}
+      DATABASE_HOSTNAME: ${WAREHOUSE_DATABASE_HOSTNAME:-warehouse-db.internal}
+      DATABASE_PORT: ${WAREHOUSE_DATABASE_PORT:-5432}
+      DATABASE_DBNAME: ${WAREHOUSE_DATABASE_DBNAME:-warehouse}
+      DEBEZIUM_DATABASE_USER: ${WAREHOUSE_DATABASE_USER:-debezium}
+      DEBEZIUM_DATABASE_PASSWORD: ${WAREHOUSE_DATABASE_PASSWORD:-admin}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${WAREHOUSE_TOPIC_PREFIX:-warehouse}
+      DEBEZIUM_SOURCE_SLOT_NAME: ${WAREHOUSE_SLOT_NAME:-warehouse_debezium}
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${WAREHOUSE_PUBLICATION_NAME:-warehouse_debezium_pub}
+      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${WAREHOUSE_SCHEMA_HISTORY_TOPIC:-warehouse.schema-history}
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${WAREHOUSE_SCHEMA_INCLUDE_LIST:-public}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${WAREHOUSE_TABLE_INCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${WAREHOUSE_TABLE_EXCLUDE_LIST:-}
+      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafbat-ui:
@@ -156,28 +211,33 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-auth-init:
+        condition: service_completed_successfully
       kafka-connect:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
     environment:
-      KAFKA_CLUSTERS_0_NAME: ${CDC_KAFBAT_CLUSTER_NAME:-cdc}
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_NAME: ${KAFBAT_CLUSTER_NAME:-cdc}
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29094
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-512
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_KAFBAT_USER:-kafbat}\" password=\"${KAFKA_KAFBAT_PASSWORD:-admin}\";"
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       KAFKA_CLUSTERS_0_DEFAULTKEYSERDE: SchemaRegistry
       KAFKA_CLUSTERS_0_DEFAULTVALUESERDE: SchemaRegistry
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: ${CDC_CONNECT_GROUP_ID:-cdc-connect}
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: ${CONNECT_GROUP_ID:-cdc-connect}
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
       AUTH_TYPE: LOGIN_FORM
-      SPRING_SECURITY_USER_NAME: ${CDC_KAFBAT_USER:-admin}
-      SPRING_SECURITY_USER_PASSWORD: ${CDC_KAFBAT_PASSWORD:-admin}
-      JAVA_OPTS: ${CDC_KAFBAT_JAVA_OPTS:--Xms128m -Xmx256m}
+      SPRING_SECURITY_USER_NAME: ${KAFBAT_USER:-admin}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFBAT_PASSWORD:-admin}
+      JAVA_OPTS: ${KAFBAT_JAVA_OPTS:--Xms128m -Xmx256m}
     restart: unless-stopped
 
 networks:
   default:
-    name: ${CDC_NETWORK_NAME:-cdc-stack-network}
+    name: ${NETWORK_NAME:-cdc-stack-network}
 
 volumes:
   kafka-data:
-    name: ${CDC_KAFKA_VOLUME_NAME:-cdc-stack-kafka-data}
+    name: ${KAFKA_VOLUME_NAME:-cdc-stack-kafka-data}

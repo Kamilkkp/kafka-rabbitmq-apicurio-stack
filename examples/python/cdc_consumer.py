@@ -7,7 +7,7 @@ CDC consumer (Python) — Kafka + Confluent Schema Registry via confluent-kafka.
 
 One-shot smoke (pull ≤N msgs, exit):
 
-  CDC_ONESHOT=1 CDC_ONESHOT_MAX=5 python3 cdc_consumer.py
+  ONESHOT=1 ONESHOT_MAX=5 python3 cdc_consumer.py
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class ConfluentAvroDecoder:
     """Ready-made Confluent AvroDeserializer against Schema Registry."""
 
     def __init__(self) -> None:
-        config = {"url": required("CDC_SCHEMA_REGISTRY_URL").rstrip("/")}
+        config = {"url": required("SCHEMA_REGISTRY_URL").rstrip("/")}
         self._sr = DebeziumSchemaRegistryClient(config)
         self._deserializer = AvroDeserializer(self._sr)
 
@@ -177,12 +177,12 @@ def subscription() -> list[str]:
 
     This consumer reads Kafka directly and librdkafka has no exclude list, so
     the topics it wants are listed rather than inferred. Set
-    `CDC_KAFKA_TOPIC_PATTERN` for a regex subscription instead.
+    `KAFKA_TOPIC_PATTERN` for a regex subscription instead.
     """
-    pattern = os.environ.get("CDC_KAFKA_TOPIC_PATTERN")
+    pattern = os.environ.get("KAFKA_TOPIC_PATTERN")
     if pattern:
         return [pattern]
-    topics = os.environ.get("CDC_TOPICS") or ",".join(
+    topics = os.environ.get("KAFKA_TOPICS") or ",".join(
         (
             "sales.public.customers",
             "sales.public.orders",
@@ -198,7 +198,7 @@ def subscription() -> list[str]:
 def seek_topics() -> set[str]:
     return {
         topic.strip()
-        for topic in os.environ.get("CDC_SEEK_TO_BEGINNING", "").split(",")
+        for topic in os.environ.get("SEEK_TO_BEGINNING", "").split(",")
         if topic.strip()
     }
 
@@ -211,13 +211,28 @@ def on_assign(consumer: Consumer, partitions: list[TopicPartition]) -> None:
     consumer.assign(partitions)
 
 
+def kafka_auth() -> dict[str, str]:
+    protocol = os.environ.get("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+    if protocol == "PLAINTEXT":
+        return {}
+    return {
+        "security.protocol": protocol,
+        "sasl.mechanisms": os.environ.get(
+            "KAFKA_SASL_MECHANISM", "SCRAM-SHA-512"
+        ),
+        "sasl.username": required("KAFKA_SASL_USERNAME"),
+        "sasl.password": required("KAFKA_SASL_PASSWORD"),
+    }
+
+
 def create_consumer() -> Consumer:
     return Consumer(
         {
-            "bootstrap.servers": required("CDC_KAFKA_BROKERS"),
-            "group.id": required("CDC_KAFKA_GROUP_ID"),
+            "bootstrap.servers": required("KAFKA_BROKERS"),
+            "group.id": required("KAFKA_GROUP_ID"),
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
+            **kafka_auth(),
         }
     )
 
@@ -239,8 +254,8 @@ def run_streaming(decoder: ConfluentAvroDecoder) -> None:
     consumer.subscribe(topics, on_assign=on_assign)
     seek = seek_topics()
     print(
-        f"CDC Python Kafka consumer group={required('CDC_KAFKA_GROUP_ID')} "
-        f"brokers={required('CDC_KAFKA_BROKERS')} topics={','.join(topics)}"
+        f"CDC Python Kafka consumer group={required('KAFKA_GROUP_ID')} "
+        f"brokers={required('KAFKA_BROKERS')} topics={','.join(topics)}"
         + (f" seek={','.join(sorted(seek))}" if seek else "")
     )
     try:
@@ -264,7 +279,7 @@ def run_streaming(decoder: ConfluentAvroDecoder) -> None:
 
 def run_oneshot(decoder: ConfluentAvroDecoder) -> int:
     topics = subscription()
-    max_messages = int(os.environ.get("CDC_ONESHOT_MAX", "5"))
+    max_messages = int(os.environ.get("ONESHOT_MAX", "5"))
     consumer = create_consumer()
     consumer.subscribe(topics, on_assign=on_assign)
     ok = 0
@@ -298,7 +313,7 @@ def run_oneshot(decoder: ConfluentAvroDecoder) -> int:
 
 def main() -> None:
     decoder = ConfluentAvroDecoder()
-    if os.environ.get("CDC_ONESHOT") == "1":
+    if os.environ.get("ONESHOT") == "1":
         raise SystemExit(run_oneshot(decoder))
     run_streaming(decoder)
 
