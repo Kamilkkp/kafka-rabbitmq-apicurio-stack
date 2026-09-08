@@ -12,13 +12,9 @@ set -euo pipefail
 : "${KAFKA_SCHEMA_REGISTRY_PASSWORD:?}"
 : "${KAFKA_KAFBAT_USER:?}"
 : "${KAFKA_KAFBAT_PASSWORD:?}"
-: "${KAFKA_CONSUMER_USER:?}"
-: "${KAFKA_CONSUMER_PASSWORD:?}"
 
 BOOTSTRAP="${KAFKA_AUTH_BOOTSTRAP:-kafka:29092}"
 CONNECT_GROUP="${CONNECT_GROUP_ID:-cdc-connect}"
-SALES_PREFIX="${SALES_TOPIC_PREFIX:-sales}"
-WAREHOUSE_PREFIX="${WAREHOUSE_TOPIC_PREFIX:-warehouse}"
 
 upsert_user() {
   local name="$1"
@@ -61,12 +57,14 @@ upsert_user "$KAFKA_ADMIN_USER" "$KAFKA_ADMIN_PASSWORD"
 upsert_user "$KAFKA_CONNECT_USER" "$KAFKA_CONNECT_PASSWORD"
 upsert_user "$KAFKA_SCHEMA_REGISTRY_USER" "$KAFKA_SCHEMA_REGISTRY_PASSWORD"
 upsert_user "$KAFKA_KAFBAT_USER" "$KAFKA_KAFBAT_PASSWORD"
-upsert_user "$KAFKA_CONSUMER_USER" "$KAFKA_CONSUMER_PASSWORD"
 
-# Connect produces CDC and owns its worker topics / group.
-add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --operation All --topic "$SALES_PREFIX" --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --operation All --topic "$WAREHOUSE_PREFIX" --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --operation All --topic cdc. --resource-pattern-type prefixed
+# Any later SCRAM user can read the log without a per-principal ACL.
+add_acl --allow-principal 'User:*' --operation Read --operation Describe --topic '*' --resource-pattern-type literal
+add_acl --allow-principal 'User:*' --operation Read --operation Describe --group '*' --resource-pattern-type literal
+add_acl --allow-principal 'User:*' --cluster --operation Describe
+
+# Connect may create any Debezium prefix from Kafbat and owns worker topics.
+add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --operation All --topic '*' --resource-pattern-type literal
 add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --operation All --group "$CONNECT_GROUP" --resource-pattern-type prefixed
 add_acl --allow-principal "User:${KAFKA_CONNECT_USER}" --cluster --operation Create --operation Describe --operation DescribeConfigs --operation Alter --operation AlterConfigs --operation IdempotentWrite
 
@@ -79,12 +77,5 @@ add_acl --allow-principal "User:${KAFKA_SCHEMA_REGISTRY_USER}" --cluster --opera
 add_acl --allow-principal "User:${KAFKA_KAFBAT_USER}" --operation Read --operation Describe --operation DescribeConfigs --topic '*' --resource-pattern-type literal
 add_acl --allow-principal "User:${KAFKA_KAFBAT_USER}" --operation Describe --operation DescribeConfigs --group '*' --resource-pattern-type literal
 add_acl --allow-principal "User:${KAFKA_KAFBAT_USER}" --cluster --operation Describe --operation DescribeConfigs --operation Alter
-
-# Application consumers read CDC and manage their own groups.
-add_acl --allow-principal "User:${KAFKA_CONSUMER_USER}" --operation Read --operation Describe --topic "$SALES_PREFIX" --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONSUMER_USER}" --operation Read --operation Describe --topic "$WAREHOUSE_PREFIX" --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONSUMER_USER}" --operation Read --operation Describe --group cdc-consumer --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONSUMER_USER}" --operation Read --operation Describe --group example- --resource-pattern-type prefixed
-add_acl --allow-principal "User:${KAFKA_CONSUMER_USER}" --cluster --operation Describe
 
 echo "SCRAM users and ACLs are in place."

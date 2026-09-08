@@ -1,18 +1,5 @@
 name: ${STACK_NAME:-cdc-stack}
 
-x-connect-init: &connect-init
-  build:
-    context: ./docker/kafka-connect
-    dockerfile: init/Dockerfile
-  depends_on:
-    schema-registry:
-      condition: service_healthy
-    kafka-connect:
-      condition: service_healthy
-  extra_hosts:
-    - 'host.docker.internal:host-gateway'
-  restart: 'no'
-
 services:
   kafka:
     image: apache/kafka:4.3.1
@@ -79,11 +66,7 @@ services:
       KAFKA_SCHEMA_REGISTRY_PASSWORD: ${KAFKA_SCHEMA_REGISTRY_PASSWORD:-admin}
       KAFKA_KAFBAT_USER: ${KAFKA_KAFBAT_USER:-kafbat}
       KAFKA_KAFBAT_PASSWORD: ${KAFKA_KAFBAT_PASSWORD:-admin}
-      KAFKA_CONSUMER_USER: ${KAFKA_CONSUMER_USER:-cdc-consumer}
-      KAFKA_CONSUMER_PASSWORD: ${KAFKA_CONSUMER_PASSWORD:-admin}
       CONNECT_GROUP_ID: ${CONNECT_GROUP_ID:-cdc-connect}
-      SALES_TOPIC_PREFIX: ${SALES_TOPIC_PREFIX:-sales}
-      WAREHOUSE_TOPIC_PREFIX: ${WAREHOUSE_TOPIC_PREFIX:-warehouse}
     volumes:
       - ./docker/kafka-auth/init-acls.sh:/usr/local/bin/init-acls.sh:ro
     command: ['/bin/bash', '/usr/local/bin/init-acls.sh']
@@ -164,46 +147,6 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  kafka-connect-init-sales:
-    <<: *connect-init
-    environment:
-      CONNECT_URL: http://kafka-connect:8083
-      CONNECTOR_NAME: ${SALES_CONNECTOR_NAME:-sales-postgres}
-      DATABASE_HOSTNAME: ${SALES_DATABASE_HOSTNAME:-sales-db.internal}
-      DATABASE_PORT: ${SALES_DATABASE_PORT:-5432}
-      DATABASE_DBNAME: ${SALES_DATABASE_DBNAME:-sales}
-      DEBEZIUM_DATABASE_USER: ${SALES_DATABASE_USER:-debezium}
-      DEBEZIUM_DATABASE_PASSWORD: ${SALES_DATABASE_PASSWORD:-admin}
-      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${SALES_TOPIC_PREFIX:-sales}
-      DEBEZIUM_SOURCE_SLOT_NAME: ${SALES_SLOT_NAME:-sales_debezium}
-      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${SALES_PUBLICATION_NAME:-sales_debezium_pub}
-      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${SALES_SCHEMA_HISTORY_TOPIC:-sales.schema-history}
-      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${SALES_SCHEMA_INCLUDE_LIST:-public}
-      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${SALES_TABLE_INCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${SALES_TABLE_EXCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${SALES_COLUMN_EXCLUDE_LIST:-}
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
-
-  kafka-connect-init-warehouse:
-    <<: *connect-init
-    environment:
-      CONNECT_URL: http://kafka-connect:8083
-      CONNECTOR_NAME: ${WAREHOUSE_CONNECTOR_NAME:-warehouse-postgres}
-      DATABASE_HOSTNAME: ${WAREHOUSE_DATABASE_HOSTNAME:-warehouse-db.internal}
-      DATABASE_PORT: ${WAREHOUSE_DATABASE_PORT:-5432}
-      DATABASE_DBNAME: ${WAREHOUSE_DATABASE_DBNAME:-warehouse}
-      DEBEZIUM_DATABASE_USER: ${WAREHOUSE_DATABASE_USER:-debezium}
-      DEBEZIUM_DATABASE_PASSWORD: ${WAREHOUSE_DATABASE_PASSWORD:-admin}
-      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${WAREHOUSE_TOPIC_PREFIX:-warehouse}
-      DEBEZIUM_SOURCE_SLOT_NAME: ${WAREHOUSE_SLOT_NAME:-warehouse_debezium}
-      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${WAREHOUSE_PUBLICATION_NAME:-warehouse_debezium_pub}
-      DEBEZIUM_SCHEMA_HISTORY_TOPIC: ${WAREHOUSE_SCHEMA_HISTORY_TOPIC:-warehouse.schema-history}
-      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: ${WAREHOUSE_SCHEMA_INCLUDE_LIST:-public}
-      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${WAREHOUSE_TABLE_INCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_TABLE_EXCLUDE_LIST: ${WAREHOUSE_TABLE_EXCLUDE_LIST:-}
-      DEBEZIUM_SOURCE_COLUMN_EXCLUDE_LIST: ${WAREHOUSE_COLUMN_EXCLUDE_LIST:-}
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
-
   kafbat-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
     ports:
@@ -218,7 +161,7 @@ services:
       schema-registry:
         condition: service_healthy
     environment:
-      KAFKA_CLUSTERS_0_NAME: ${KAFBAT_CLUSTER_NAME:-cdc}
+      KAFKA_CLUSTERS_0_NAME: ${KAFBAT_CLUSTER_NAME:-cgm-kafka}
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29094
       KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_PLAINTEXT
       KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-512

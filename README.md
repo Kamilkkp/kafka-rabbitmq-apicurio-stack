@@ -1,143 +1,46 @@
 # Kafka, Debezium, and Confluent Schema Registry CDC stack
 
-Standalone Docker Compose infrastructure that streams PostgreSQL changes:
+Shared CDC infrastructure for dev, staging, and production:
 
 ```text
-PostgreSQL (external, one database per connector)
+PostgreSQL (your databases, outside this compose)
   -> Debezium on Kafka Connect
   -> one compacted Kafka topic per table (`{prefix}.{schema}.{table}`)
   -> application-owned Kafka consumer
 ```
 
-Confluent Schema Registry stores the Avro schemas and Kafbat UI exposes Kafka,
-Kafka Connect, and the registry. There is intentionally no shared application
-broker: Kafka is the CDC contract and every service owns its consumer group,
-retry policy, dead-letter queue, and optional local job system.
+[`compose.yaml`](compose.yaml) is the environment stack: Kafka, Schema Registry,
+Kafka Connect, and Kafbat. It does not start databases or register connectors.
+You add each source in Kafbat after the source PostgreSQL is prepared.
 
-[`compose.yaml`](compose.yaml) contains only shared CDC infrastructure. Point
-its connectors at real PostgreSQL databases with environment variables.
-[`compose.demo.yaml`](compose.demo.yaml) adds sample `sales` and `warehouse`
-sources plus a service-owned PostgreSQL used by the Node pg-boss example.
+## Deploy
 
-## Repository layout
-
-```text
-.
-├── compose.yaml
-├── compose.demo.yaml
-├── .env.example
-├── .env.demo.example
-├── docker/kafka-connect/
-├── postgres/sales/
-├── postgres/warehouse/
-└── examples/
-    ├── node/    # Kafka -> pg-boss -> LWW projection
-    └── python/  # direct Kafka PoC
-```
-
-## Try it locally
-
-You need Docker Compose v2 and free host ports `9092`, `8081`–`8083`, and
-`5433`–`5435`.
+You need Docker Compose v2 and free host ports `9092`, `8081`–`8083`.
 
 ```bash
-cp .env.demo.example .env
-docker compose -f compose.yaml -f compose.demo.yaml up --build -d
-```
-
-Wait for Kafka and both connectors:
-
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml ps
-curl -s http://localhost:8083/connectors/sales-postgres/status
-curl -s http://localhost:8083/connectors/warehouse-postgres/status
-```
-
-Endpoints:
-
-- Kafka: `localhost:9092` (`SASL_PLAINTEXT` / `SCRAM-SHA-512`, user `cdc-consumer` / `admin`)
-- Schema Registry: http://localhost:8081
-- Kafbat UI: http://localhost:8082
-- Kafka Connect REST: http://localhost:8083
-- demo DB `sales`: `localhost:5433` (`postgres` / `postgres`)
-- demo DB `warehouse`: `localhost:5434` (`postgres` / `postgres`)
-- Node consumer DB: `localhost:5435` (`postgres` / `postgres`)
-
-Snapshot rows from `sales` (`customers`, `orders`, `order_items`) and
-`warehouse` (`products`, `warehouses`, `stock_levels`) are already published.
-Trigger a live change:
-
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml exec postgres-sales \
-  psql -U postgres -d sales -c \
-  "UPDATE customers SET full_name = 'Ada Byron' WHERE email = 'ada@example.test';"
-```
-
-Inspect `sales.public.customers` in Kafbat, or start either consumer:
-
-- [`examples/node`](examples/node) — durable service-local processing with pg-boss
-- [`examples/python`](examples/python) — direct Kafka decoding PoC
-
-Stop without deleting Kafka or PostgreSQL data:
-
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml down
-```
-
-Add `--volumes` only for a clean slate.
-
-## UIs and tools
-
-| Service | Address | Browser UI | Login |
-| --- | --- | --- | --- |
-| Kafka | `localhost:9092` | no | `SCRAM-SHA-512` (`cdc-consumer` / `admin`) |
-| Schema Registry | http://localhost:8081 | REST only | none |
-| Kafbat UI | http://localhost:8082 | yes | `admin` / `admin` |
-| Kafka Connect REST | http://localhost:8083 | no | — |
-
-Kafbat is the Kafka browser for per-table topics, messages, connectors, and
-registry schemas. Schema Registry itself is the Confluent REST API at
-http://localhost:8081 (`/subjects`, `/schemas/ids/{id}`).
-
-## Kafka authentication
-
-Client listeners use `SASL_PLAINTEXT` and `SCRAM-SHA-512`. There is no TLS in
-this demo; production should use `SASL_SSL`.
-
-| Principal | Used by | Kafka ACL sketch |
-| --- | --- | --- |
-| `admin` | superuser | none (authorizer bypass) |
-| `connect` | Debezium / Kafka Connect | all on `sales.`, `warehouse.`, `cdc.`; group `cdc-connect`; cluster create/describe/alter |
-| `schema-registry` | Schema Registry | all on `_schemas`; group `schema-registry` |
-| `kafbat` | Kafbat UI Kafka client | read/describe topics and groups |
-| `cdc-consumer` | Node and Python examples | read `sales.` / `warehouse.`; groups `cdc-consumer*` and `example-*` |
-
-`KAFBAT_USER` is only the Kafbat **web** login. The Kafka principal is
-`KAFKA_KAFBAT_USER` (`kafbat`).
-
-The broker also has a docker-only `INTERNAL` PLAINTEXT listener on
-`kafka:29092`. Kafka requires that inter-broker listener in
-`advertised.listeners`, so it is advertised inside Compose but **not**
-published to the host. `User:ANONYMOUS` is a superuser there so
-`kafka-auth-init` can create SCRAM users and ACLs without baking credentials
-into `kafka-storage format`. Application clients must use `kafka:29094` or
-`localhost:9092`. Anyone on the Compose network can still reach `29092`
-without a password; treat that network as trusted.
-
-If you change listeners on an existing volume and Kafka will not start, remove
-only the Kafka volume (`cdc-stack-kafka-data`) and bring the stack up again.
-
-## Deploy the shared infrastructure
-
-On a real host use only [`compose.yaml`](compose.yaml):
-
-```bash
-cp .env.example .env
+cp .env.example .env          # 2 vCPU / 4 GiB
+# or: cp .env.prod.example .env   # 2 vCPU / 8 GiB
 docker compose up --build -d
 ```
 
-Set the two PostgreSQL hostnames, credentials, publications, and slots first.
-Each source database needs logical replication:
+Step-by-step for a real host is at the bottom.
+
+Endpoints:
+
+- Kafka: `localhost:9092` (`SASL_PLAINTEXT` / `SCRAM-SHA-512`)
+- Schema Registry: http://localhost:8081
+- Kafbat UI: http://localhost:8082 (`KAFBAT_USER` / `KAFBAT_PASSWORD`)
+- Kafka Connect REST: http://localhost:8083 (no login; keep it off the public internet)
+
+Connectors are not created at startup. After Kafka Connect is healthy, add them
+in Kafbat.
+
+## Add a Debezium connector in Kafbat
+
+Kafbat talks to Kafka Connect, so you can create, edit, restart, and delete
+connectors in the UI (Kafka Connect → new connector → `PostgresConnector`).
+
+Kafbat does **not** prepare PostgreSQL. Each source database still needs:
 
 ```text
 wal_level=logical
@@ -145,17 +48,54 @@ max_replication_slots>=1
 max_wal_senders>=1
 ```
 
-[`postgres/sales/init/03_debezium.sql`](postgres/sales/init/03_debezium.sql)
-and [`postgres/warehouse/init/03_debezium.sql`](postgres/warehouse/init/03_debezium.sql)
-show the replication role, grants, and publication.
+Role, grants, and publication:
 
-After changing `docker/kafka-connect/postgres.config.json`, recreate connector
-registration jobs:
-
-```bash
-docker compose -f compose.yaml -f compose.demo.yaml up -d --build --force-recreate \
-  kafka-connect-init-sales kafka-connect-init-warehouse
+```sql
+CREATE ROLE debezium WITH LOGIN REPLICATION PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE sales TO debezium;
+GRANT USAGE ON SCHEMA public TO debezium;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO debezium;
+CREATE PUBLICATION sales_debezium_pub FOR TABLES IN SCHEMA public;
 ```
+
+Copy [`docker/kafka-connect/postgres.connector.example.json`](docker/kafka-connect/postgres.connector.example.json)
+and change hostname, database, user, password, `topic.prefix`, slot, and
+publication. Keep:
+
+- Avro converters pointing at `http://schema-registry:8081`
+- schema history on `kafka:29094` with the `connect` SCRAM user
+- `publication.autocreate.mode=disabled`
+
+## Kafka authentication
+
+Client listeners use `SASL_PLAINTEXT` and `SCRAM-SHA-512`. There is no TLS in
+this compose; production traffic across a network should use `SASL_SSL`.
+
+| Principal | Used by | Kafka ACL |
+| --- | --- | --- |
+| `admin` | superuser | authorizer bypass |
+| `connect` | Debezium / Kafka Connect | all topics and the `cdc-connect` group |
+| `schema-registry` | Schema Registry | `_schemas` |
+| `kafbat` | Kafbat Kafka client | read/describe topics and groups |
+| `*` | every authenticated user | read/describe all topics and groups |
+
+`KAFBAT_USER` is only the Kafbat **web** login. The Kafka principal is
+`KAFKA_KAFBAT_USER` (`kafbat`).
+
+`connect` is allowed on all topics so a connector added in Kafbat with a new
+`topic.prefix` does not need a compose change. A new SCRAM user only needs
+credentials; `User:*` already grants read. Write still requires an extra ACL.
+
+The broker also has a docker-only `INTERNAL` PLAINTEXT listener on
+`kafka:29092`. Kafka requires that inter-broker listener in
+`advertised.listeners`, so it is advertised inside Compose but **not**
+published to the host. `User:ANONYMOUS` is a superuser there so
+`kafka-auth-init` can seed SCRAM users. Application clients must use
+`kafka:29094` or `localhost:9092`. Treat the Compose network as trusted.
+
+If you change listeners on an existing volume and Kafka will not start, remove
+only the Kafka volume and bring the stack up again.
 
 ## Replica identity
 
@@ -169,24 +109,24 @@ The default is the primary key. For a table without one:
    non-deferrable index whose columns are `NOT NULL`;
 3. use `REPLICA IDENTITY FULL` only as a heavier last resort.
 
-For example:
-
 ```sql
 ALTER TABLE public.course_waitlist
   ADD PRIMARY KEY (course_id, user_id);
 ```
 
-Check the setting:
+## Event model
 
-```sql
-SELECT n.nspname AS schema, c.relname AS table, c.relreplident
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = 'course_waitlist';
--- d = DEFAULT, i = index, f = FULL, n = NOTHING
-```
+- Every captured table gets its own compacted topic, for example
+  `sales.public.orders`.
+- This compose uses one partition per topic. Ordering is per table; Kafka keys
+  preserve ordering for one row.
+- Values use Confluent-wire Avro (`0x00`, schema ID, payload).
+- Subjects follow TopicNameStrategy: `{topic}-key` / `{topic}-value`.
+- The Kafka record key is the definitive row identity, including composite
+  primary keys.
+- Debezium emits a normal `op=d` envelope and then a null tombstone.
 
-## State and persistence
+## State
 
 | State | Where it lives | Volume |
 | --- | --- | --- |
@@ -194,58 +134,65 @@ WHERE c.relname = 'course_waitlist';
 | Connect configs, offsets, status | `cdc.connect-*` topics | `kafka-data` |
 | Debezium schema history | topic per connector | `kafka-data` |
 | Schema Registry subjects | `_schemas` topic | `kafka-data` |
-| Demo source data | PostgreSQL | `postgres-sales-data`, `postgres-warehouse-data` |
-| Node jobs and DLQ | service-owned PostgreSQL | `postgres-consumer-data` |
 
-Schema Registry stores Avro subjects in the compacted `_schemas` topic.
+## Uruchomienie na dev, staging albo production
 
-## Event model
+Raz na każde środowisko, na hoście z Docker Compose v2. Heap z
+[`.env.prod.example`](.env.prod.example) jest pod **2 vCPU / 8 GiB RAM**.
+[`.env.example`](.env.example) to mniejszy profil na 4 GiB.
 
-- Every captured table gets its own compacted topic, for example
-  `sales.public.orders`.
-- Topics have one partition in this demo. Ordering is per table; Kafka keys
-  preserve ordering for one row.
-- Values use Confluent-wire Avro (`0x00`, schema ID, payload).
-- Subjects follow TopicNameStrategy, so each table is
-  `{topic}-key` / `{topic}-value` — for example
-  `sales.public.orders-value` and `warehouse.public.products-key`.
-- The Kafka record key is the definitive row identity, including composite
-  primary keys.
-- Debezium emits a normal `op=d` envelope and then a null tombstone. Consumers
-  process the delete envelope and skip the tombstone.
+1. Skopiuj to repozytorium na host.
+2. Skopiuj plik env i go uzupełnij:
 
-## Consumer ownership and replay
+   ```bash
+   cp .env.prod.example .env
+   ```
 
-Every application uses its own Kafka consumer group. The shared stack neither
-knows nor operates application queues.
+3. Jeśli na jednym Dockerze może stanąć więcej niż jeden stack, daj
+   środowisku własne nazwy, np. `cdc-dev`, `cdc-stg`, `cdc-prod`:
 
-The Node example demonstrates the boundary:
+   ```bash
+   STACK_NAME=cdc-prod
+   NETWORK_NAME=cdc-prod-network
+   KAFKA_VOLUME_NAME=cdc-prod-kafka-data
+   ```
 
-1. Decode the generic Avro envelope and key through Schema Registry. No table-specific
-   Zod schema runs on the Kafka path.
-2. Insert a JSON-safe job into service-owned pg-boss using a deterministic ID
-   derived from topic/partition/offset (plus a run ID for explicit replay).
-3. Commit the Kafka offset only after the PostgreSQL insert succeeds.
-4. Let pg-boss run table-specific Zod and business handlers. Handler failures
-   retry with exponential backoff and end in a local DLQ; Kafka keeps moving.
-5. Apply last-write-wins per `(table, primary key)` using Debezium `source.lsn`.
-   Move the watermark only after the projection write succeeds.
+4. Ustaw `KAFKA_ADVERTISED_HOST` na DNS albo IP, które widzą klienci
+   (nie `localhost`, chyba że klienci są na tym samym hoście).
+5. Wygeneruj **nowe** `KAFKA_CLUSTER_ID` dla tego środowiska:
 
-The deterministic live job ID closes the Kafka/PostgreSQL dual-write gap: a
-crash after enqueue but before offset commit causes redelivery, but the
-duplicate job insert is harmless. Replay gets a per-run namespace so another
-intentional replay can execute the same latest coordinate again.
+   ```bash
+   docker run --rm apache/kafka:4.3.1 /opt/kafka/bin/kafka-storage.sh random-uuid
+   ```
 
-For a full replay, the Node example reads every table topic from offset zero up
-to startup high watermarks and enqueues those jobs before starting live
-consumption. Replay accepts `LSN == watermark` so the latest event is applied
-again; older events remain stale.
+   Wklej wartość do `.env`. Nie używaj ID z innego środowiska.
+6. Domyślne hasła Kafki i Kafbata to `admin`. Zmień je, jeśli host nie jest
+   w zamkniętej sieci. `KAFBAT_USER` to tylko login do UI;
+   `KAFKA_KAFBAT_USER` to konto Kafka.
+7. Otwórz w firewallu tylko to, czego potrzebują klienci: `9092` (Kafka),
+   `8081` (Schema Registry), `8082` (Kafbat). `8083` (Connect REST) trzymaj
+   z dala od internetu — Kafbat woła go wewnątrz sieci Compose.
+8. Uruchom stack:
 
-Child-before-parent delivery does not require buffering the whole log. A child
-job can fail its foreign key and retry while the independent parent job
-succeeds. pg-boss uses `key_strict_fifo`, so one failed row blocks successors
-for that row but not unrelated rows.
+   ```bash
+   docker compose --env-file .env up --build -d
+   ```
 
-One caveat remains independent of Kafka or the job system: replaying an
-intermediate parent delete executes `ON DELETE CASCADE`. Local-only dependent
-state does not reappear merely because a later CDC event re-inserts the parent.
+9. Poczekaj, aż Kafka, Schema Registry, Kafka Connect i Kafbat będą healthy:
+
+   ```bash
+   docker compose ps
+   ```
+
+10. Na każdym źródłowym PostgreSQL włącz logical replication, załóż rolę
+    `debezium`, granty i publication (patrz wyżej).
+11. W Kafbat wejdź w Kafka Connect i utwórz `PostgresConnector` ze wzoru
+    [`docker/kafka-connect/postgres.connector.example.json`](docker/kafka-connect/postgres.connector.example.json).
+    Wskaż tę bazę. W polach JAAS schema history wstaw hasło SCRAM użytkownika
+    `connect` z `.env`.
+12. Sprawdź, że connector jest `RUNNING` oraz że widać topiki
+    `{prefix}.{schema}.{table}` i subjecty w Schema Registry.
+
+Zatrzymanie bez kasowania danych Kafki: `docker compose down`.  
+`--volumes` tylko gdy chcesz pusty klaster (przy następnym starcie daj też
+nowe `KAFKA_CLUSTER_ID`).
