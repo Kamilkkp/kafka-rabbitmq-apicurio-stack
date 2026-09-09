@@ -101,6 +101,139 @@ Treat the Compose network as trusted.
 If you change listeners on an existing volume and Kafka will not start, remove
 only the Kafka volume and bring the stack up again.
 
+## Nowy użytkownik Kafka po postawieniu stacku
+
+Robisz to na już działającym brokerze. Konta i ACL-e są w metadanych Kafki
+(volume `kafka-data`), nie w `compose.yaml`. Kont aplikacji nie dopisuj do
+`.env`, chyba że to serwis stacku (`connect`, `schema-registry`, `kafbat`).
+
+Komendy administracyjne idą przez nasłuch INTERNAL (tylko w sieci Dockera).
+Z hosta wejdź do kontenera Kafki (port `29092` nie jest wystawiony na zewnątrz):
+
+```bash
+docker compose exec kafka bash
+```
+
+W kontenerze bootstrap to `localhost:29092`. `User:ANONYMOUS` jest tam
+superuserem, więc te polecenia nie potrzebują SASL.
+
+Założenie konta albo zmiana hasła (ta sama komenda nadpisuje credential).
+`--entity-name user-name` to login, `password=twoje-haslo` to hasło —
+podmień oba:
+
+```bash
+/opt/kafka/bin/kafka-configs.sh \
+  --bootstrap-server localhost:29092 \
+  --alter --entity-type users --entity-name user-name \
+  --add-config 'SCRAM-SHA-512=[password=twoje-haslo]'
+```
+
+Lista użytkowników:
+
+```bash
+/opt/kafka/bin/kafka-configs.sh \
+  --bootstrap-server localhost:29092 \
+  --describe --entity-type users
+```
+
+Usunięcie credentiala SCRAM (principal nie zaloguje się):
+
+```bash
+/opt/kafka/bin/kafka-configs.sh \
+  --bootstrap-server localhost:29092 \
+  --alter --entity-type users --entity-name user-name \
+  --delete-config SCRAM-SHA-512
+```
+
+Klienci nadal łączą się na `localhost:9092` (albo `kafka:29094` w sieci
+Compose) przez `SASL_PLAINTEXT` / `SCRAM-SHA-512`.
+
+### Uprawnienia (ACL)
+
+`ALLOW_EVERYONE_IF_NO_ACL_FOUND` jest `false`, więc brak ACL-a to odmowa.
+Init już daje `User:*` **Read** i **Describe** na wszystkich topikach i grupach
+oraz **Describe** na klastrze. Nowy użytkownik SCRAM może więc czytać topiki
+CDC bez osobnego ACL-a na siebie. **Write**, **Create** i idempotentny produce
+wymagają jawnego allow.
+
+Lista ACL-i:
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --list
+```
+
+Zapis na jeden topik:
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --add \
+  --allow-principal User:user-name \
+  --operation Write --operation Describe \
+  --topic topic-name
+```
+
+Zapis na wszystkie topiki o wspólnym przedrostku (tu: `topic-name.`):
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --add \
+  --allow-principal User:user-name \
+  --operation Write --operation Describe \
+  --topic topic-name. --resource-pattern-type prefixed
+```
+
+Topiki CDC pisze Connect użytkownikiem `connect` — aplikacji nie dawaj na nie
+zapisu. Powyższe jest dla własnych topików aplikacji.
+
+Idempotentny producer (`enable.idempotence=true`) potrzebuje też
+`IdempotentWrite` na klastrze:
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --add \
+  --allow-principal User:user-name \
+  --cluster --operation IdempotentWrite
+```
+
+Aplikacja tylko konsumująca zwykle **nie potrzebuje dodatkowego ACL-a**:
+`User:*` już pokrywa odczyt. Gdybyś kiedyś zabrał wildcard, daj temu
+principalowi Read/Describe na topiku i na jego consumer group:
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --add \
+  --allow-principal User:user-name \
+  --operation Read --operation Describe \
+  --topic topic-name
+
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --add \
+  --allow-principal User:user-name \
+  --operation Read --operation Describe \
+  --group group-name
+```
+
+Zdjęcie allow (bez `--resource-pattern-type prefixed`, chyba że tak zakładałeś):
+
+```bash
+/opt/kafka/bin/kafka-acls.sh \
+  --bootstrap-server localhost:29092 \
+  --remove \
+  --allow-principal User:user-name \
+  --operation Write --operation Describe \
+  --topic topic-name
+```
+
+Kont aplikacji nie wstawiaj do `KAFKA_SUPER_USERS` — to omija ACL-e.
+Jedyny nazwany superuser poza `ANONYMOUS` na INTERNAL ma zostać `admin`.
+
 ## Replica identity
 
 Tables published for `UPDATE` and `DELETE` need a stable row identity.
