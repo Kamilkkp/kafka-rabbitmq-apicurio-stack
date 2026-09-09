@@ -20,6 +20,8 @@ You need Docker Compose v2 and free host ports `9092`, `8081`–`8083`.
 ```bash
 cp .env.example .env          # 2 vCPU / 4 GiB
 # or: cp .env.prod.example .env   # 2 vCPU / 8 GiB
+docker compose up -d kafka --wait
+docker compose --profile init run --rm kafka-auth-init
 docker compose up --build -d
 ```
 
@@ -91,8 +93,10 @@ The broker also has a docker-only `INTERNAL` PLAINTEXT listener on
 `kafka:29092`. Kafka requires that inter-broker listener in
 `advertised.listeners`, so it is advertised inside Compose but **not**
 published to the host. `User:ANONYMOUS` is a superuser there so
-`kafka-auth-init` can seed SCRAM users. Application clients must use
-`kafka:29094` or `localhost:9092`. Treat the Compose network as trusted.
+`kafka-auth-init` seeds SCRAM users (Compose profile `init`; not started by a
+plain `up`). Run it once after Kafka is healthy and before Schema Registry /
+Connect. Application clients must use `kafka:29094` or `localhost:9092`.
+Treat the Compose network as trusted.
 
 If you change listeners on an existing volume and Kafka will not start, remove
 only the Kafka volume and bring the stack up again.
@@ -172,11 +176,17 @@ Raz na każde środowisko, na hoście z Docker Compose v2. Heap z
 7. Otwórz w firewallu tylko to, czego potrzebują klienci: `9092` (Kafka),
    `8081` (Schema Registry), `8082` (Kafbat). `8083` (Connect REST) trzymaj
    z dala od internetu — Kafbat woła go wewnątrz sieci Compose.
-8. Uruchom stack:
+8. Uruchom stack (init SCRAM/ACL zanim wstaną Schema Registry i Connect):
 
    ```bash
+   docker compose --env-file .env up -d kafka --wait
+   docker compose --env-file .env --profile init run --rm kafka-auth-init
    docker compose --env-file .env up --build -d
    ```
+
+   Przy kolejnych startach na tym samym volume Kafki init nie jest
+   obowiązkowy — użytkownicy i ACL-e już są w metadanych. Po `down -v`
+   albo nowym `KAFKA_CLUSTER_ID` odpal go znowu.
 
 9. Poczekaj, aż Kafka, Schema Registry, Kafka Connect i Kafbat będą healthy:
 

@@ -52,8 +52,12 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # One-shot SCRAM/ACL seed. Not started by `up`; use:
+  # docker compose --profile init run --rm kafka-auth-init
   kafka-auth-init:
     image: apache/kafka:4.3.1
+    profiles:
+      - init
     depends_on:
       kafka:
         condition: service_healthy
@@ -79,8 +83,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-auth-init:
-        condition: service_completed_successfully
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
@@ -110,8 +112,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-auth-init:
-        condition: service_completed_successfully
     environment:
       BOOTSTRAP_SERVERS: kafka:29094
       CONNECT_SECURITY_PROTOCOL: SASL_PLAINTEXT
@@ -154,8 +154,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-auth-init:
-        condition: service_completed_successfully
       kafka-connect:
         condition: service_healthy
       schema-registry:
